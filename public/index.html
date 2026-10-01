@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Tablica PDF">
+  <meta name="theme-color" content="#ffffff">
+  <title>Tablica PDF</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="toolbar">
+    <div class="group">
+      <div id="colors" class="cluster"></div>
+      <button id="eraser" class="tool" title="Gumka (E)" aria-label="Gumka">
+        <svg viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>
+      </button>
+      <span class="sep"></span>
+      <div id="sizes" class="cluster" title="Grubość pisaka i gumki"></div>
+      <span class="sep"></span>
+      <button id="undo" title="Cofnij moją ostatnią kreskę (Ctrl+Z)" aria-label="Cofnij">
+        <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+      </button>
+      <button id="clear" title="Wyczyść bieżącą stronę" aria-label="Wyczyść stronę">
+        <svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+      <button id="finger" class="toggle" title="Rysowanie palcem (wyłączone: palec przewija, rysik pisze)" aria-label="Rysowanie palcem" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-6-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>
+      </button>
+    </div>
+
+    <div class="group middle">
+      <button id="pageInfo" class="text" title="Przejdź do strony">– / –</button>
+      <span id="peers"></span>
+    </div>
+
+    <div class="group">
+      <button id="zoomOut" class="zoomctl" title="Pomniejsz" aria-label="Pomniejsz">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/></svg>
+      </button>
+      <button id="zoomIn" class="zoomctl" title="Powiększ" aria-label="Powiększ">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
+      </button>
+      <span class="sep zoomctl"></span>
+      <button id="upload" title="Wgraj PDF" aria-label="Wgraj PDF">
+        <svg viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3-3 3 3"/></svg>
+      </button>
+      <button id="download" title="Pobierz PDF z notatkami" aria-label="Pobierz PDF z notatkami">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+      </button>
+      <button id="share" class="primary" title="Udostępnij link uczniowi">
+        <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        <span>Link</span>
+      </button>
+      <span id="conn" title="Połączenie"></span>
+    </div>
+  </header>
+
+  <main id="viewer">
+    <div id="pages"></div>
+    <div id="empty" hidden>
+      <h1>Tablica PDF</h1>
+      <p>Wgraj plik PDF – każdą stronę możecie razem zapisywać w czasie rzeczywistym.</p>
+      <button id="emptyUpload" class="primary big">Wybierz plik PDF</button>
+      <p class="hint">Potem kliknij <b>Link</b> i wyślij go uczniowi.</p>
+    </div>
+    <div id="loading" hidden>Wczytywanie…</div>
+  </main>
+
+  <input id="fileInput" type="file" accept="application/pdf,.pdf" hidden>
+  <input id="colorInput" type="color" tabindex="-1" aria-hidden="true">
+  <div id="toast" role="status"></div>
+
+  <script src="/vendor/pdfjs/pdf.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
