@@ -192,6 +192,8 @@
 
   // ---------- PDF i strony ----------
   async function loadPdf(info) {
+    // Gdy zapiski zostały (doklejono strony), zostań w tym samym miejscu dokumentu.
+    const prevScroll = strokes.size ? viewer.scrollTop : 0;
     teardownPages();
     pdfDoc && pdfDoc.destroy();
     pdfDoc = null;
@@ -224,7 +226,8 @@
       document.title = info.name.replace(/\.pdf$/i, '') + ' – Tablica PDF';
       layout();
       pages.forEach((p) => observer.observe(p.el));
-      viewer.scrollTop = 0;
+      viewer.scrollTop = prevScroll;
+      if (jumpToPage !== null) { goToPage(jumpToPage); jumpToPage = null; }
       updateCurrentPage();
     } catch (err) {
       console.error(err);
@@ -510,20 +513,113 @@
   $('#upload').onclick = () => fileInput.click();
   $('#emptyUpload').onclick = () => fileInput.click();
 
-  fileInput.addEventListener('change', () => {
-    const file = fileInput.files[0];
+  // Można wybrać PDF-y i/lub zdjęcia (kilka naraz). Zdjęcia są zamieniane na strony PDF w przeglądarce.
+  const MAX_IMAGE_SIDE = 2400;  // dłuższy bok zdjęcia w pikselach (zdjęcia z telefonu są zmniejszane)
+  const IMAGE_PAGE_WIDTH = 595; // szerokość strony ze zdjęciem w punktach PDF (jak A4)
+  let jumpToPage = null;
+
+  const isPdfFile = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+
+  fileInput.addEventListener('change', async () => {
+    const files = Array.from(fileInput.files);
     fileInput.value = '';
-    if (!file) return;
-    if (pdfDoc && strokes.size && !confirm('Nowy PDF zastąpi obecny i usunie wszystkie zapiski. Kontynuować?')) return;
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/room/${roomId}/pdf`);
-    xhr.setRequestHeader('Content-Type', 'application/pdf');
-    xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
-    xhr.upload.onprogress = (e) => e.lengthComputable && toast(`Wysyłanie PDF… ${Math.round(e.loaded / e.total * 100)}%`, 60000);
-    xhr.onload = () => toast(xhr.status === 200 ? 'PDF wgrany' : 'Błąd: ' + xhr.responseText);
-    xhr.onerror = () => toast('Nie udało się wysłać pliku');
-    xhr.send(file);
+    if (!files.length) return;
+
+    let mode = 'replace';
+    if (pdfDoc) {
+      mode = await askUploadMode();
+      if (mode === 'cancel') return;
+    }
+
+    try {
+      let blob = files[0];
+      let name = files[0].name;
+      const oldCount = pages.length;
+      if (mode === 'append') {
+        toast('Przygotowuję strony…', 60000);
+        const current = await fetch(`/api/room/${roomId}/pdf?v=${pdfInfo.version}`).then((r) => r.blob());
+        blob = await buildPdf([current, ...files]);
+        name = pdfInfo.name;
+      } else if (files.length > 1 || !isPdfFile(files[0])) {
+        toast('Przygotowuję strony…', 60000);
+        blob = await buildPdf(files);
+        name = files.length === 1 ? files[0].name.replace(/\.[^.]+$/, '') + '.pdf' : `Tablica ${new Date().toISOString().slice(0, 10)}.pdf`;
+      }
+      if (mode === 'append') jumpToPage = oldCount; // po wczytaniu przewiń do pierwszej nowej strony
+      await uploadPdf(blob, name, mode === 'append');
+    } catch (err) {
+      jumpToPage = null;
+      console.error(err);
+      toast(err.userMessage || 'Nie udało się przygotować plików');
+    }
   });
+
+  function uploadPdf(blob, name, keep) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/room/${roomId}/pdf${keep ? '?keep=1' : ''}`);
+      xhr.setRequestHeader('Content-Type', 'application/pdf');
+      xhr.setRequestHeader('X-File-Name', encodeURIComponent(name));
+      xhr.upload.onprogress = (e) => e.lengthComputable && toast(`Wysyłanie… ${Math.round(e.loaded / e.total * 100)}%`, 60000);
+      xhr.onload = () => {
+        if (xhr.status === 200) { toast('Wgrane'); resolve(); }
+        else reject(Object.assign(new Error(xhr.responseText), { userMessage: 'Błąd: ' + xhr.responseText }));
+      };
+      xhr.onerror = () => reject(Object.assign(new Error('network'), { userMessage: 'Nie udało się wysłać pliku' }));
+      xhr.send(blob);
+    });
+  }
+
+  // Skleja pliki (PDF-y i zdjęcia) w jeden PDF, w kolejności wyboru.
+  async function buildPdf(files) {
+    if (!window.PDFLib) await loadScript('/vendor/pdf-lib/pdf-lib.min.js');
+    const out = await PDFLib.PDFDocument.create();
+    for (const f of files) {
+      if (isPdfFile(f)) {
+        const src = await PDFLib.PDFDocument.load(await f.arrayBuffer(), { ignoreEncryption: true });
+        const copied = await out.copyPages(src, src.getPageIndices());
+        copied.forEach((p) => out.addPage(p));
+      } else {
+        const img = await out.embedJpg(await imageToJpeg(f));
+        const h = IMAGE_PAGE_WIDTH * img.height / img.width;
+        out.addPage([IMAGE_PAGE_WIDTH, h]).drawImage(img, { x: 0, y: 0, width: IMAGE_PAGE_WIDTH, height: h });
+      }
+    }
+    return new Blob([await out.save()], { type: 'application/pdf' });
+  }
+
+  async function imageToJpeg(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      try { await img.decode(); } catch {
+        throw Object.assign(new Error('decode'), { userMessage: `Nie można odczytać pliku „${file.name}”` });
+      }
+      const k = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * k);
+      c.height = Math.round(img.naturalHeight * k);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; // przezroczyste tło (np. PNG) -> białe
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9));
+      c.width = c.height = 0;
+      return blob.arrayBuffer();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  const uploadDialog = $('#uploadDialog');
+  function askUploadMode() {
+    return new Promise((resolve) => {
+      uploadDialog.returnValue = 'cancel';
+      uploadDialog.addEventListener('close', () => resolve(uploadDialog.returnValue || 'cancel'), { once: true });
+      uploadDialog.showModal();
+    });
+  }
 
   $('#share').onclick = async () => {
     const url = location.href;

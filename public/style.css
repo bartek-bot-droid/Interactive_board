@@ -184,6 +184,28 @@ button.primary,
 button.big { height: 52px; padding: 0 26px; border-radius: 14px; font-size: 17px; }
 #loading { color: var(--muted); font-weight: 600; }
 
+#uploadDialog {
+  border: 0;
+  border-radius: 16px;
+  padding: 22px;
+  width: min(380px, calc(100vw - 32px));
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .25);
+  color: var(--ink);
+  background: var(--bar);
+}
+#uploadDialog::backdrop { background: rgba(15, 18, 25, .45); }
+#uploadDialog h2 { margin: 0 0 16px; font-size: 18px; }
+#uploadDialog form { display: flex; flex-direction: column; }
+#uploadDialog button {
+  height: 48px;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+}
+#uploadDialog button.danger { background: #fef2f2; color: var(--bad); }
+#uploadDialog button.plain { color: var(--muted); margin-top: 4px; }
+#uploadDialog p { margin: 6px 4px 14px; font-size: 13px; color: var(--muted); }
+
 #colorInput { position: fixed; left: 12px; top: 12px; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
 
 #toast {

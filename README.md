@@ -3,7 +3,8 @@
 Wspólna tablica na plikach PDF. Nauczyciel (np. iPad + Apple Pencil) i uczeń (np. komputer z rysikiem)
 piszą po tych samych stronach i widzą zmiany na żywo.
 
-- wgrywasz cały PDF (np. 30 stron) i piszesz po każdej stronie,
+- wgrywasz cały PDF (np. 30 stron) albo zdjęcia (kilka naraz, każde to osobna strona) i piszesz po każdej stronie,
+- do trwającej tablicy możesz dokleić kolejne zdjęcia lub PDF na końcu – zapiski zostają,
 - 5 kolorów pisaka (dotknij aktywnego koloru jeszcze raz, żeby go zmienić) i gumka,
 - 4 grubości (cienki, średni, gruby, bardzo gruby) – działają dla pisaka i gumki,
 - „Cofnij” (Ctrl+Z) cofa Twoją ostatnią kreskę, kosz czyści bieżącą stronę,

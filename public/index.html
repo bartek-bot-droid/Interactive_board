@@ -44,7 +44,7 @@
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
       </button>
       <span class="sep zoomctl"></span>
-      <button id="upload" title="Wgraj PDF" aria-label="Wgraj PDF">
+      <button id="upload" title="Wgraj PDF lub zdjęcia" aria-label="Wgraj PDF lub zdjęcia">
         <svg viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3-3 3 3"/></svg>
       </button>
       <button id="download" title="Pobierz PDF z notatkami" aria-label="Pobierz PDF z notatkami">
@@ -62,14 +62,25 @@
     <div id="pages"></div>
     <div id="empty" hidden>
       <h1>Tablica PDF</h1>
-      <p>Wgraj plik PDF – każdą stronę możecie razem zapisywać w czasie rzeczywistym.</p>
-      <button id="emptyUpload" class="primary big">Wybierz plik PDF</button>
+      <p>Wgraj plik PDF albo zdjęcia – każdą stronę możecie razem zapisywać w czasie rzeczywistym.</p>
+      <button id="emptyUpload" class="primary big">Wybierz PDF lub zdjęcia</button>
       <p class="hint">Potem kliknij <b>Link</b> i wyślij go uczniowi.</p>
     </div>
     <div id="loading" hidden>Wczytywanie…</div>
   </main>
 
-  <input id="fileInput" type="file" accept="application/pdf,.pdf" hidden>
+  <input id="fileInput" type="file" accept="application/pdf,.pdf,image/*" multiple hidden>
+
+  <dialog id="uploadDialog">
+    <form method="dialog">
+      <h2>Co zrobić z wybranymi plikami?</h2>
+      <button value="append" class="primary">Dodaj na końcu tablicy</button>
+      <p>Obecne strony i zapiski zostają.</p>
+      <button value="replace" class="danger">Zastąp całą tablicę</button>
+      <p>Obecne strony i wszystkie zapiski zostaną usunięte.</p>
+      <button value="cancel" class="plain">Anuluj</button>
+    </form>
+  </dialog>
   <input id="colorInput" type="color" tabindex="-1" aria-hidden="true">
   <div id="toast" role="status"></div>
 

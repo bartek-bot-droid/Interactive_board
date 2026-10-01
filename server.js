@@ -66,9 +66,10 @@ app.post('/api/room/:id/pdf', express.raw({ type: '*/*', limit: MAX_PDF_MB + 'mb
     if (err) return res.status(500).send('Nie udało się zapisać pliku');
     const name = String(req.get('X-File-Name') || 'dokument.pdf').slice(0, 200);
     room.pdf = { version: Date.now(), name: decodeURIComponent(name) };
-    room.strokes = [];
+    // keep=1: nowe strony doklejone na końcu, więc dotychczasowe zapiski zostają na swoich stronach
+    if (req.query.keep !== '1') room.strokes = [];
     scheduleSave(room);
-    io.to(id).emit('state', { pdf: room.pdf, strokes: [] });
+    io.to(id).emit('state', { pdf: room.pdf, strokes: room.strokes });
     res.json(room.pdf);
   });
 });
