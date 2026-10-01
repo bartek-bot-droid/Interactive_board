@@ -64,6 +64,10 @@
   });
   socket.on('disconnect', () => $('#conn').classList.remove('on'));
 
+  // Darmowy Render usypia serwer po 15 min bez zapytań HTTP (i kasuje wtedy tablice),
+  // więc dopóki tablica jest otwarta, co 4 minuty dajemy znać, że ktoś z niej korzysta.
+  setInterval(() => fetch('/api/ping', { cache: 'no-store' }).catch(() => {}), 4 * 60 * 1000);
+
   socket.on('state', async (st) => {
     strokes.clear();
     byPage.clear();

@@ -74,6 +74,9 @@ app.post('/api/room/:id/pdf', express.raw({ type: '*/*', limit: MAX_PDF_MB + 'mb
   });
 });
 
+// Strona wysyła tu zapytanie co kilka minut, żeby darmowy serwer nie usnął w trakcie lekcji.
+app.get('/api/ping', (req, res) => res.sendStatus(204));
+
 app.get('/api/room/:id/pdf', (req, res) => {
   const { id } = req.params;
   if (!ROOM_RE.test(id)) return res.sendStatus(400);
