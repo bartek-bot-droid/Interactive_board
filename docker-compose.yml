@@ -1,0 +1,10 @@
+# Synology Container Manager -> Projekt -> Utwórz: wskaż folder z tymi plikami.
+services:
+  tablica:
+    build: .
+    container_name: tablica-pdf
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data   # tablice (PDF-y i zapiski) zostają na dysku NAS
+    restart: unless-stopped
