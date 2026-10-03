@@ -1,10 +1,14 @@
 # Synology Container Manager -> Projekt -> Utwórz: wskaż folder z tymi plikami.
+# Tablica działa wprost z plików w tym folderze (bez budowania obrazu), więc aktualizacja to:
+# wgraj nowe pliki -> Akcja -> Uruchom ponownie.
 services:
   tablica:
-    build: .
+    image: node:22-alpine
     container_name: tablica-pdf
+    working_dir: /app
+    command: sh -c "npm install --omit=dev --omit=optional --no-audit --no-fund && exec node server.js"
     ports:
       - "3000:3000"
     volumes:
-      - ./data:/app/data   # tablice (PDF-y i zapiski) zostają na dysku NAS
+      - ./:/app   # kod + folder data (tablice, PDF-y, PIN) na dysku NAS
     restart: unless-stopped
