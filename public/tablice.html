@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Tablice">
+  <meta name="theme-color" content="#f4f5f8">
+  <title>Moje tablice</title>
+  <style>
+    :root {
+      --bg: #f4f5f8;
+      --card: #ffffff;
+      --ink: #1f2328;
+      --muted: #6b7280;
+      --line: #e2e4e9;
+      --hover: #f1f2f5;
+      --accent: #2563eb;
+      --accent-soft: #e7eefc;
+      --ok: #16a34a;
+      --bad: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-text-size-adjust: 100%;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button, input { font: inherit; color: inherit; }
+    button { cursor: pointer; border: 0; background: none; touch-action: manipulation; }
+    [hidden] { display: none !important; }
+
+    .wrap { max-width: 760px; margin: 0 auto; padding: calc(24px + env(safe-area-inset-top)) 16px 48px; }
+
+    .btn {
+      height: 44px; padding: 0 16px; border-radius: 12px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      font-weight: 600; white-space: nowrap; text-decoration: none;
+    }
+    .btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .btn.primary { background: var(--accent); color: #fff; }
+    .btn.primary:hover { background: #1d4fd8; }
+    .btn.soft { background: var(--card); border: 1px solid var(--line); }
+    .btn.soft:hover { background: var(--hover); }
+    .btn.icon { width: 44px; padding: 0; }
+    .btn.danger { color: var(--bad); }
+    .btn:disabled { opacity: .5; cursor: default; }
+
+    /* ---------- PIN ---------- */
+    .auth {
+      min-height: calc(100vh - 80px);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+    }
+    .auth h1 { margin: 0 0 6px; font-size: 26px; }
+    .auth p { margin: 0 0 22px; color: var(--muted); max-width: 340px; }
+    .auth form { display: flex; flex-direction: column; gap: 10px; width: min(300px, 100%); }
+    .pin {
+      height: 56px; border-radius: 14px; border: 1px solid var(--line); background: var(--card);
+      text-align: center; font-size: 26px; letter-spacing: .35em; outline: none;
+    }
+    .pin:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .auth .btn { height: 52px; font-size: 16px; }
+    .error { color: var(--bad); min-height: 22px; font-size: 14px; margin: 4px 0 0; }
+
+    /* ---------- lista ---------- */
+    header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+    header h1 { margin: 0; font-size: 26px; flex: 1; }
+    .menu { position: relative; }
+    .menu-list {
+      position: absolute; right: 0; top: 50px; z-index: 5; min-width: 190px;
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 6px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.12);
+    }
+    .menu-list button { display: block; width: 100%; text-align: left; padding: 10px 12px; border-radius: 8px; }
+    .menu-list button:hover { background: var(--hover); }
+
+    .boards { display: flex; flex-direction: column; gap: 10px; }
+    .board {
+      background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+      padding: 14px 14px 14px 18px; display: flex; align-items: center; gap: 12px;
+    }
+    .board .info { flex: 1; min-width: 0; }
+    .board .title { font-weight: 650; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .board .meta { color: var(--muted); font-size: 13px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .board .live { color: var(--ok); font-weight: 600; }
+    .board .actions { display: flex; gap: 4px; flex: none; }
+    .board .actions .btn.icon { color: var(--muted); }
+    .board .actions .btn.icon:hover { background: var(--hover); color: var(--ink); }
+    .board.fresh { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+    .empty { text-align: center; color: var(--muted); padding: 48px 16px; }
+    .empty p { margin: 0 0 16px; }
+
+    /* ---------- okna ---------- */
+    dialog {
+      border: 0; border-radius: 18px; padding: 22px; width: min(400px, calc(100vw - 32px));
+      background: var(--card); color: var(--ink); box-shadow: 0 12px 44px rgba(0,0,0,.25);
+    }
+    dialog::backdrop { background: rgba(15, 18, 25, .45); }
+    dialog h2 { margin: 0 0 16px; font-size: 19px; }
+    dialog label { display: block; font-size: 14px; font-weight: 600; margin: 0 0 6px; }
+    dialog .hint { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+    dialog input[type=text], dialog input[type=password] {
+      width: 100%; height: 46px; border-radius: 12px; border: 1px solid var(--line);
+      padding: 0 12px; outline: none; background: #fff;
+    }
+    dialog input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    dialog .field { margin-bottom: 16px; }
+    dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+
+    #toast {
+      position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
+      transform: translate(-50%, 20px); background: #1f2328; color: #fff;
+      padding: 10px 16px; border-radius: 12px; font-weight: 500; opacity: 0;
+      pointer-events: none; transition: opacity .2s, transform .2s; max-width: calc(100vw - 32px);
+    }
+    #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 560px) {
+      .board { flex-wrap: wrap; }
+      .board .actions { width: 100%; justify-content: flex-end; }
+      #newBtn span { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <!-- Ustawienie PIN-u (pierwsze uruchomienie) -->
+    <section id="setup" class="auth" hidden>
+      <h1>Ustaw PIN nauczyciela</h1>
+      <p>PIN chroni listę Twoich tablic. Uczniowie go nie potrzebują – wchodzą tylko przez swój link.</p>
+      <form id="setupForm" autocomplete="off">
+        <input class="pin" id="setupPin" type="password" inputmode="numeric" maxlength="8" placeholder="4–8 cyfr" autocomplete="new-password">
+        <input class="pin" id="setupPin2" type="password" inputmode="numeric" maxlength="8" placeholder="powtórz" autocomplete="new-password">
+        <button class="btn primary">Ustaw PIN</button>
+        <div class="error" id="setupError"></div>
+      </form>
+    </section>
+
+    <!-- Logowanie -->
+    <section id="login" class="auth" hidden>
+      <h1>Moje tablice</h1>
+      <p>Wpisz PIN nauczyciela.</p>
+      <form id="loginForm" autocomplete="off">
+        <input class="pin" id="loginPin" type="password" inputmode="numeric" maxlength="8" placeholder="PIN" autocomplete="current-password">
+        <button class="btn primary">Zaloguj</button>
+        <div class="error" id="loginError"></div>
+      </form>
+    </section>
+
+    <!-- Lista tablic -->
+    <section id="list" hidden>
+      <header>
+        <h1>Moje tablice</h1>
+        <button class="btn primary" id="newBtn">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>Nowa tablica</span>
+        </button>
+        <div class="menu">
+          <button class="btn soft icon" id="menuBtn" aria-label="Więcej">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+          </button>
+          <div class="menu-list" id="menuList" hidden>
+            <button id="changePinBtn">Zmień PIN</button>
+            <button id="logoutBtn">Wyloguj z tego urządzenia</button>
+          </div>
+        </div>
+      </header>
+      <div class="boards" id="boards"></div>
+      <div class="empty" id="empty" hidden>
+        <p>Nie masz jeszcze żadnej tablicy.</p>
+        <button class="btn primary" id="emptyNew">Utwórz pierwszą tablicę</button>
+      </div>
+    </section>
+  </div>
+
+  <dialog id="newDialog">
+    <form method="dialog" id="newForm">
+      <h2>Nowa tablica</h2>
+      <div class="field">
+        <label for="newTitle">Nazwa</label>
+        <input type="text" id="newTitle" maxlength="80" placeholder="np. Kasia – fizyka" required>
+      </div>
+      <div class="field">
+        <label for="newCode">Własny kod w linku (opcjonalnie)</label>
+        <input type="text" id="newCode" maxlength="32" placeholder="np. kasia4817" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <p class="hint">Małe litery i cyfry, 4–32 znaki. Zostaw puste, a kod zostanie wylosowany.</p>
+      </div>
+      <div class="error" id="newError"></div>
+      <div class="row">
+        <button class="btn soft" value="cancel" formnovalidate>Anuluj</button>
+        <button class="btn primary" id="newSubmit" value="ok">Utwórz</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="pinDialog">
+    <form method="dialog" id="pinForm" autocomplete="off">
+      <h2>Zmień PIN</h2>
+      <div class="field">
+        <label for="oldPin">Obecny PIN</label>
+        <input type="password" id="oldPin" inputmode="numeric" maxlength="8" autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label for="newPin">Nowy PIN (4–8 cyfr)</label>
+        <input type="password" id="newPin" inputmode="numeric" maxlength="8" autocomplete="new-password">
+        <p class="hint">Inne zalogowane urządzenia zostaną wylogowane.</p>
+      </div>
+      <div class="error" id="pinError"></div>
+      <div class="row">
+        <button class="btn soft" value="cancel" formnovalidate>Anuluj</button>
+        <button class="btn primary" value="ok">Zmień</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status"></div>
+
+  <script>
+  (() => {
+    'use strict';
+    const $ = (s) => document.querySelector(s);
+    const TOKEN_KEY = 'tablica.teacherToken';
+
+    const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } };
+    const setToken = (t) => { try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch { /* brak */ } };
+
+    async function api(method, url, body) {
+      const res = await fetch('/api/admin' + url, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-Teacher-Token': getToken() },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (res.status === 401) { setToken(''); show('login'); throw new Error('Zaloguj się ponownie'); }
+      if (!res.ok) throw new Error(await res.text() || 'Błąd serwera');
+      return res.status === 204 ? null : res.json();
+    }
+
+    function show(id) {
+      for (const s of ['setup', 'login', 'list']) $('#' + s).hidden = s !== id;
+      const focus = { setup: '#setupPin', login: '#loginPin' }[id];
+      if (focus) setTimeout(() => $(focus).focus(), 50);
+    }
+
+    let toastTimer;
+    function toast(msg) {
+      const t = $('#toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+    }
+
+    // ---------- PIN ----------
+    $('#setupForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const pin = $('#setupPin').value, pin2 = $('#setupPin2').value;
+      const err = $('#setupError');
+      if (!/^\d{4,8}$/.test(pin)) { err.textContent = 'PIN musi mieć od 4 do 8 cyfr'; return; }
+      if (pin !== pin2) { err.textContent = 'PIN-y się różnią'; return; }
+      try {
+        const { token } = await api('POST', '/setup', { pin });
+        setToken(token);
+        loadBoards();
+      } catch (ex) { err.textContent = ex.message; }
+    });
+
+    $('#loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = $('#loginError');
+      err.textContent = '';
+      try {
+        const { token } = await api('POST', '/login', { pin: $('#loginPin').value });
+        setToken(token);
+        $('#loginPin').value = '';
+        loadBoards();
+      } catch (ex) {
+        err.textContent = ex.message;
+        $('#loginPin').select();
+      }
+    });
+
+    // ---------- lista ----------
+    const boardUrl = (id) => `${location.origin}/?b=${id}`;
+    const fmtTime = new Intl.DateTimeFormat('pl-PL', { hour: '2-digit', minute: '2-digit' });
+    const fmtDate = new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: 'short', year: 'numeric' });
+
+    function when(ts) {
+      const d = new Date(ts), today = new Date();
+      const days = Math.round((new Date(today.toDateString()) - new Date(d.toDateString())) / 864e5);
+      if (days === 0) return 'dziś, ' + fmtTime.format(d);
+      if (days === 1) return 'wczoraj, ' + fmtTime.format(d);
+      return fmtDate.format(d);
+    }
+
+    const plural = (n, one, few, many) =>
+      n === 1 ? one : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)) ? few : many;
+
+    let freshId = null;
+
+    async function loadBoards() {
+      let boards;
+      try { boards = await api('GET', '/boards'); } catch { return; }
+      show('list');
+      const box = $('#boards');
+      box.textContent = '';
+      $('#empty').hidden = boards.length > 0;
+      for (const b of boards) box.appendChild(renderBoard(b));
+      freshId = null;
+    }
+
+    function icon(path) {
+      return `<svg viewBox="0 0 24 24">${path}</svg>`;
+    }
+
+    function renderBoard(b) {
+      const el = document.createElement('div');
+      el.className = 'board' + (b.id === freshId ? ' fresh' : '');
+
+      const info = document.createElement('div');
+      info.className = 'info';
+      const title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = b.title || (b.pdfName ? b.pdfName.replace(/\.pdf$/i, '') : 'Tablica ' + b.id);
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const parts = [
+        b.pdfName ? b.pdfName : 'bez PDF',
+        b.notes ? `${b.notes} ${plural(b.notes, 'zapisek', 'zapiski', 'zapisków')}` : '',
+        'zmiana: ' + when(b.updatedAt),
+        '?b=' + b.id,
+      ].filter(Boolean);
+      meta.textContent = parts.join(' · ');
+      if (b.online) {
+        const live = document.createElement('span');
+        live.className = 'live';
+        live.textContent = ` · ● ${b.online} ${plural(b.online, 'osoba', 'osoby', 'osób')} teraz`;
+        meta.appendChild(live);
+      }
+      info.append(title, meta);
+
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const mk = (label, svg, onClick, cls = 'btn icon') => {
+        const btn = document.createElement('button');
+        btn.className = cls;
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+        btn.innerHTML = svg;
+        btn.onclick = onClick;
+        return btn;
+      };
+      actions.append(
+        mk('Kopiuj link dla ucznia', icon('<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>'), () => shareLink(b)),
+        mk('Zmień nazwę', icon('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>'), () => rename(b)),
+        mk('Usuń tablicę', icon('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>'), () => remove(b), 'btn icon danger'),
+      );
+      const open = document.createElement('a');
+      open.className = 'btn primary';
+      open.href = '/?b=' + b.id;
+      open.textContent = 'Otwórz';
+      actions.append(open);
+
+      el.append(info, actions);
+      return el;
+    }
+
+    async function shareLink(b) {
+      const url = boardUrl(b.id);
+      if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+        try { await navigator.share({ title: b.title || 'Tablica', url }); return; } catch { /* anulowano */ }
+      }
+      try { await navigator.clipboard.writeText(url); toast('Link skopiowany'); }
+      catch { prompt('Skopiuj link i wyślij uczniowi:', url); }
+    }
+
+    async function rename(b) {
+      const t = prompt('Nowa nazwa tablicy:', b.title || '');
+      if (t === null) return;
+      try { await api('PATCH', '/boards/' + b.id, { title: t }); loadBoards(); }
+      catch (ex) { toast(ex.message); }
+    }
+
+    async function remove(b) {
+      const name = b.title || b.pdfName || b.id;
+      if (!confirm(`Usunąć tablicę „${name}” razem z PDF-em i wszystkimi zapiskami?\n\nTego nie da się cofnąć.`)) return;
+      try { await api('DELETE', '/boards/' + b.id); toast('Tablica usunięta'); loadBoards(); }
+      catch (ex) { toast(ex.message); }
+    }
+
+    // ---------- nowa tablica ----------
+    const newDialog = $('#newDialog');
+    function openNew() {
+      $('#newTitle').value = '';
+      $('#newCode').value = '';
+      $('#newError').textContent = '';
+      newDialog.showModal();
+      setTimeout(() => $('#newTitle').focus(), 50);
+    }
+    $('#newBtn').onclick = openNew;
+    $('#emptyNew').onclick = openNew;
+
+    $('#newForm').addEventListener('submit', async (e) => {
+      if (e.submitter && e.submitter.value === 'cancel') return;
+      e.preventDefault();
+      const code = $('#newCode').value.trim().toLowerCase();
+      if (code && !/^[a-z0-9]{4,32}$/.test(code)) {
+        $('#newError').textContent = 'Kod: tylko małe litery (bez polskich znaków) i cyfry, 4–32 znaki';
+        return;
+      }
+      $('#newSubmit').disabled = true;
+      try {
+        const { id } = await api('POST', '/boards', { title: $('#newTitle').value, code });
+        freshId = id;
+        newDialog.close();
+        toast('Tablica utworzona');
+        loadBoards();
+      } catch (ex) {
+        $('#newError').textContent = ex.message;
+      } finally {
+        $('#newSubmit').disabled = false;
+      }
+    });
+
+    // ---------- menu ----------
+    $('#menuBtn').onclick = (e) => { e.stopPropagation(); $('#menuList').hidden = !$('#menuList').hidden; };
+    document.addEventListener('click', () => { $('#menuList').hidden = true; });
+
+    $('#logoutBtn').onclick = async () => {
+      try { await api('POST', '/logout'); } catch { /* i tak wylogowujemy */ }
+      setToken('');
+      show('login');
+    };
+
+    const pinDialog = $('#pinDialog');
+    $('#changePinBtn').onclick = () => {
+      $('#oldPin').value = $('#newPin').value = '';
+      $('#pinError').textContent = '';
+      pinDialog.showModal();
+    };
+    $('#pinForm').addEventListener('submit', async (e) => {
+      if (e.submitter && e.submitter.value === 'cancel') return;
+      e.preventDefault();
+      try {
+        const { token } = await api('POST', '/pin', { oldPin: $('#oldPin').value, newPin: $('#newPin').value });
+        setToken(token);
+        pinDialog.close();
+        toast('PIN zmieniony');
+      } catch (ex) { $('#pinError').textContent = ex.message; }
+    });
+
+    // ---------- start ----------
+    (async () => {
+      if (getToken()) { await loadBoards(); if (!$('#list').hidden) return; }
+      try {
+        const { pinSet } = await fetch('/api/admin/status').then((r) => r.json());
+        show(pinSet ? 'login' : 'setup');
+      } catch { show('login'); }
+    })();
+
+    // Po powrocie do karty (np. z tablicy) odśwież listę, żeby daty i „online” były aktualne.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !$('#list').hidden) loadBoards();
+    });
+  })();
+  </script>
+</body>
+</html>

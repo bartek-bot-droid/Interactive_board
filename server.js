@@ -2,6 +2,7 @@
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const crypto = require('crypto');
 const express = require('express');
 const { Server } = require('socket.io');
 
@@ -23,7 +24,7 @@ app.use('/vendor/pdf-lib', express.static(path.join(__dirname, 'node_modules/pdf
 app.use('/vendor/fonts',express.static(path.join(__dirname, 'node_modules/pdfjs-dist/standard_fonts')));
 
 // ---------- stan tablic ----------
-// room = { id, pdf: {version, name} | null, strokes: [stroke], saveTimer }
+// room = { id, title, createdAt, updatedAt, pdf: {version, name} | null, strokes: [stroke], saveTimer }
 // stroke = { id, page, tool: 'pen'|'eraser', color, size, pts: [x,y,x,y,...], done }
 const rooms = new Map();
 
@@ -33,23 +34,35 @@ const jsonFile = (id) => path.join(DATA_DIR, id + '.json');
 function getRoom(id) {
   let room = rooms.get(id);
   if (room) return room;
-  room = { id, pdf: null, strokes: [], saveTimer: null };
+  room = { id, title: '', createdAt: Date.now(), updatedAt: 0, pdf: null, strokes: [], saveTimer: null };
   try {
     const saved = JSON.parse(fs.readFileSync(jsonFile(id), 'utf8'));
     if (saved.pdf && fs.existsSync(pdfFile(id))) room.pdf = saved.pdf;
     room.strokes = (saved.strokes || []).map((s) => ({ ...s, done: true }));
+    room.title = saved.title || '';
+    room.updatedAt = saved.updatedAt || fs.statSync(jsonFile(id)).mtimeMs;
+    room.createdAt = saved.createdAt || room.updatedAt;
   } catch { /* nowa tablica */ }
   rooms.set(id, room);
   return room;
 }
 
-function scheduleSave(room) {
-  clearTimeout(room.saveTimer);
-  room.saveTimer = setTimeout(() => {
-    const data = JSON.stringify({ pdf: room.pdf, strokes: room.strokes });
-    fs.writeFile(jsonFile(room.id), data, (err) => err && console.error('Zapis nieudany', err));
-  }, 1500);
+function writeRoom(room) {
+  const data = JSON.stringify({
+    title: room.title, createdAt: room.createdAt, updatedAt: room.updatedAt,
+    pdf: room.pdf, strokes: room.strokes,
+  });
+  fs.writeFile(jsonFile(room.id), data, (err) => err && console.error('Zapis nieudany', err));
 }
+
+function scheduleSave(room) {
+  if (room.deleted) return;
+  room.updatedAt = Date.now();
+  clearTimeout(room.saveTimer);
+  room.saveTimer = setTimeout(() => writeRoom(room), 1500);
+}
+
+const roomState = (room) => ({ title: room.title, pdf: room.pdf, strokes: room.strokes });
 
 const findStroke = (room, id) => room.strokes.find((s) => s.id === id);
 
@@ -69,7 +82,7 @@ app.post('/api/room/:id/pdf', express.raw({ type: '*/*', limit: MAX_PDF_MB + 'mb
     // keep=1: nowe strony doklejone na końcu, więc dotychczasowe zapiski zostają na swoich stronach
     if (req.query.keep !== '1') room.strokes = [];
     scheduleSave(room);
-    io.to(id).emit('state', { pdf: room.pdf, strokes: room.strokes });
+    io.to(id).emit('state', roomState(room));
     res.json(room.pdf);
   });
 });
@@ -86,6 +99,162 @@ app.get('/api/room/:id/pdf', (req, res) => {
   res.sendFile(pdfFile(id));
 });
 
+// ---------- lista tablic (tylko dla nauczyciela, chroniona PIN-em) ----------
+// PIN (skrót scrypt) i sesje trzyma plik _config.json – podkreślnik nie pasuje do ROOM_RE,
+// więc nie da się go pomylić z tablicą.
+const CONFIG_FILE = path.join(DATA_DIR, '_config.json');
+const SESSION_DAYS = 180;
+const MAX_FAILS = 5;
+const LOCK_MINUTES = 15;
+
+let config = { pin: null, sessions: {} }; // pin = {salt, hash}; sessions = {sha256(token): wygasa}
+try { config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) }; } catch { /* brak PIN-u */ }
+const saveConfig = () => fs.writeFileSync(CONFIG_FILE, JSON.stringify(config));
+
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+const hashPin = (pin, salt) => crypto.scryptSync(pin, salt, 32).toString('hex');
+const validPin = (pin) => typeof pin === 'string' && /^\d{4,8}$/.test(pin);
+
+function pinMatches(pin) {
+  const a = Buffer.from(hashPin(pin, config.pin.salt), 'hex');
+  return crypto.timingSafeEqual(a, Buffer.from(config.pin.hash, 'hex'));
+}
+
+function setPin(pin) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  config.pin = { salt, hash: hashPin(pin, salt) };
+}
+
+function newSession() {
+  const now = Date.now();
+  for (const [k, exp] of Object.entries(config.sessions)) if (exp < now) delete config.sessions[k];
+  const token = crypto.randomBytes(32).toString('hex');
+  config.sessions[sha256(token)] = now + SESSION_DAYS * 864e5;
+  saveConfig();
+  return token;
+}
+
+// Wszystkie zapytania przychodzą przez Tailscale z 127.0.0.1, więc blokada prób jest wspólna:
+// po 5 błędnych PIN-ach logowanie jest wstrzymane na 15 min (zalogowane urządzenia działają dalej).
+let failedLogins = [];
+function loginLockedFor() {
+  const since = Date.now() - LOCK_MINUTES * 6e4;
+  failedLogins = failedLogins.filter((t) => t > since);
+  if (failedLogins.length < MAX_FAILS) return 0;
+  return Math.ceil((failedLogins[0] + LOCK_MINUTES * 6e4 - Date.now()) / 6e4);
+}
+
+function requireTeacher(req, res, next) {
+  const token = req.get('X-Teacher-Token') || '';
+  const exp = config.sessions[sha256(token)];
+  if (token && exp && exp > Date.now()) return next();
+  res.status(401).send('Zaloguj się PIN-em');
+}
+
+const admin = express.Router();
+admin.use(express.json());
+
+admin.get('/status', (req, res) => res.json({ pinSet: !!config.pin }));
+
+admin.post('/setup', (req, res) => {
+  if (config.pin) return res.status(409).send('PIN jest już ustawiony');
+  if (!validPin(req.body.pin)) return res.status(400).send('PIN musi mieć od 4 do 8 cyfr');
+  setPin(req.body.pin);
+  res.json({ token: newSession() });
+});
+
+admin.post('/login', (req, res) => {
+  if (!config.pin) return res.status(409).send('Najpierw ustaw PIN');
+  const wait = loginLockedFor();
+  if (wait) return res.status(429).send(`Za dużo błędnych prób. Spróbuj za ${wait} min.`);
+  if (!validPin(req.body.pin) || !pinMatches(req.body.pin)) {
+    failedLogins.push(Date.now());
+    return res.status(403).send('Zły PIN');
+  }
+  res.json({ token: newSession() });
+});
+
+admin.post('/logout', requireTeacher, (req, res) => {
+  delete config.sessions[sha256(req.get('X-Teacher-Token'))];
+  saveConfig();
+  res.sendStatus(204);
+});
+
+admin.post('/pin', requireTeacher, (req, res) => {
+  if (!validPin(req.body.oldPin) || !pinMatches(req.body.oldPin)) return res.status(403).send('Obecny PIN jest nieprawidłowy');
+  if (!validPin(req.body.newPin)) return res.status(400).send('Nowy PIN musi mieć od 4 do 8 cyfr');
+  setPin(req.body.newPin);
+  config.sessions = {}; // wyloguj wszystkie inne urządzenia
+  res.json({ token: newSession() });
+});
+
+admin.get('/boards', requireTeacher, (req, res) => {
+  const ids = new Set(rooms.keys());
+  for (const f of fs.readdirSync(DATA_DIR)) {
+    const m = /^([a-z0-9]{4,32})\.json$/.exec(f);
+    if (m) ids.add(m[1]);
+  }
+  const boards = [];
+  for (const id of ids) {
+    const room = getRoom(id);
+    if (!room.title && !room.pdf && !room.strokes.length) continue; // ktoś tylko otworzył pusty link
+    boards.push({
+      id,
+      title: room.title,
+      pdfName: room.pdf ? room.pdf.name : '',
+      notes: room.strokes.filter((s) => s.tool === 'pen').length,
+      createdAt: room.createdAt,
+      updatedAt: room.updatedAt || room.createdAt,
+      online: (io.sockets.adapter.rooms.get(id) || new Set()).size,
+    });
+  }
+  boards.sort((a, b) => b.updatedAt - a.updatedAt);
+  res.json(boards);
+});
+
+const cleanTitle = (t) => String(t || '').trim().slice(0, 80);
+
+admin.post('/boards', requireTeacher, (req, res) => {
+  let id = String(req.body.code || '').toLowerCase();
+  if (id) {
+    if (!ROOM_RE.test(id)) return res.status(400).send('Kod: tylko małe litery i cyfry, od 4 do 32 znaków');
+    const existing = getRoom(id);
+    if (existing.title || existing.pdf || existing.strokes.length) return res.status(409).send('Tablica z tym kodem już istnieje');
+  } else {
+    do id = crypto.randomBytes(8).toString('base64url').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10);
+    while (id.length < 8 || fs.existsSync(jsonFile(id)) || rooms.has(id));
+  }
+  const room = getRoom(id);
+  room.title = cleanTitle(req.body.title) || 'Nowa tablica';
+  room.createdAt = room.updatedAt = Date.now();
+  writeRoom(room);
+  res.json({ id });
+});
+
+admin.patch('/boards/:id', requireTeacher, (req, res) => {
+  const { id } = req.params;
+  if (!ROOM_RE.test(id)) return res.sendStatus(400);
+  const room = getRoom(id);
+  room.title = cleanTitle(req.body.title);
+  clearTimeout(room.saveTimer);
+  writeRoom(room); // bez zmiany daty ostatniej pracy
+  io.to(id).emit('title', room.title);
+  res.sendStatus(204);
+});
+
+admin.delete('/boards/:id', requireTeacher, (req, res) => {
+  const { id } = req.params;
+  if (!ROOM_RE.test(id)) return res.sendStatus(400);
+  const room = rooms.get(id);
+  if (room) { clearTimeout(room.saveTimer); room.deleted = true; }
+  rooms.delete(id);
+  for (const f of [jsonFile(id), pdfFile(id)]) fs.rmSync(f, { force: true });
+  io.to(id).emit('state', { title: '', pdf: null, strokes: [] });
+  res.sendStatus(204);
+});
+
+app.use('/api/admin', admin);
+
 // ---------- WebSocket: kreski na żywo ----------
 function broadcastPeers(roomId) {
   const peers = [];
@@ -99,12 +268,18 @@ function broadcastPeers(roomId) {
 io.on('connection', (socket) => {
   let room = null;
 
+  // Tablica usunięta z listy, a ktoś ma ją jeszcze otwartą: pisze dalej na nowej, pustej tablicy.
+  socket.use((packet, next) => {
+    if (room && room.deleted) room = getRoom(room.id);
+    next();
+  });
+
   socket.on('join', (id) => {
     if (typeof id !== 'string' || !ROOM_RE.test(id)) return;
     if (room) socket.leave(room.id);
     room = getRoom(id);
     socket.join(id);
-    socket.emit('state', { pdf: room.pdf, strokes: room.strokes });
+    socket.emit('state', roomState(room));
     broadcastPeers(id);
   });
 

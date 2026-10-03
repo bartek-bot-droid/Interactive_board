@@ -24,9 +24,9 @@
   const params = new URLSearchParams(location.search);
   let roomId = (params.get('b') || '').toLowerCase();
   if (!/^[a-z0-9]{4,32}$/.test(roomId)) {
-    roomId = randomId(10);
-    params.set('b', roomId);
-    history.replaceState(null, '', location.pathname + '?' + params);
+    // Bez kodu tablicy: lista tablic nauczyciela (chroniona PIN-em).
+    location.replace('/tablice.html');
+    return;
   }
   const clientId = randomId(6);
   let strokeCounter = 0;
@@ -41,6 +41,7 @@
   let pdfDoc = null;
   let pdfVersion;                 // undefined = jeszcze nic nie wczytano
   let pdfInfo = null;             // { version, name }
+  let boardTitle = '';            // nazwa nadana na liście tablic
   let pages = [];                 // { index, el, pdfPage, baseW, aspect, mounted, pdfCanvas, ink, task, gen }
   const strokes = new Map();      // id -> stroke
   const byPage = new Map();       // nr strony -> [stroke]
@@ -63,6 +64,15 @@
     socket.emit('view', currentPage);
   });
   socket.on('disconnect', () => $('#conn').classList.remove('on'));
+  socket.on('title', (t) => { boardTitle = t || ''; updateTitle(); });
+
+  function updateTitle() {
+    const name = boardTitle || (pdfInfo ? pdfInfo.name.replace(/\.pdf$/i, '') : '');
+    document.title = name ? name + ' – Tablica PDF' : 'Tablica PDF';
+  }
+
+  // Przycisk powrotu do listy widzi tylko nauczyciel (urządzenie zalogowane PIN-em).
+  try { if (localStorage.getItem('tablica.teacherToken')) $('#boards').hidden = false; } catch { /* brak */ }
 
   // Darmowy Render usypia serwer po 15 min bez zapytań HTTP (i kasuje wtedy tablice),
   // więc dopóki tablica jest otwarta, co 4 minuty dajemy znać, że ktoś z niej korzysta.
@@ -75,6 +85,8 @@
     for (let i = myStrokes.length - 1; i >= 0; i--) if (!strokes.has(myStrokes[i])) myStrokes.splice(i, 1);
 
     pdfInfo = st.pdf;
+    boardTitle = st.title || '';
+    updateTitle();
     const v = st.pdf ? st.pdf.version : null;
     if (v !== pdfVersion) {
       pdfVersion = v;
@@ -227,7 +239,6 @@
         pagesEl.appendChild(el);
         return { index, el, pdfPage, baseW: vp.width, aspect: vp.height / vp.width, mounted: false, gen: 0 };
       });
-      document.title = info.name.replace(/\.pdf$/i, '') + ' – Tablica PDF';
       layout();
       pages.forEach((p) => observer.observe(p.el));
       viewer.scrollTop = prevScroll;
@@ -702,7 +713,7 @@
 
       const blob = new Blob([await out.save()], { type: 'application/pdf' });
       const date = new Date().toISOString().slice(0, 10);
-      const base = (pdfInfo.name || 'tablica').replace(/\.pdf$/i, '');
+      const base = (boardTitle || pdfInfo.name || 'tablica').replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|]/g, '-');
       saveFile(blob, `${base} – notatki ${date}.pdf`);
       toast('PDF z notatkami gotowy');
     } catch (err) {

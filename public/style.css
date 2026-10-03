@@ -70,7 +70,19 @@ button {
   justify-content: center;
   gap: 6px;
 }
-#toolbar button:hover { background: var(--hover); }
+#toolbar a.toolbtn {
+  height: 44px;
+  min-width: 40px;
+  padding: 0 8px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+#toolbar a.toolbtn[hidden] { display: none; }
+#toolbar button:hover, #toolbar a.toolbtn:hover { background: var(--hover); }
+#toolbar a.toolbtn svg,
 #toolbar button svg {
   width: 22px; height: 22px;
   fill: none; stroke: currentColor; stroke-width: 2;
@@ -230,7 +242,9 @@ button.big { height: 52px; padding: 0 26px; border-radius: 14px; font-size: 17px
 @media (max-width: 1060px) {
   .zoomctl { display: none !important; }
   #share span { display: none; }
-  #toolbar { gap: 4px; }
+  #toolbar { gap: 4px; padding-left: max(6px, env(safe-area-inset-left)); padding-right: max(6px, env(safe-area-inset-right)); }
+  .group { gap: 0; }
+  .group.middle { gap: 6px; }
   #toolbar button { min-width: 40px; padding: 0 8px; }
   #toolbar .cluster button { min-width: 34px; padding: 0 5px; }
   #toolbar #pageInfo { min-width: 0; padding: 0 6px; }
