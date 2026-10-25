@@ -90,7 +90,7 @@
     const v = st.pdf ? st.pdf.version : null;
     if (v !== pdfVersion) {
       pdfVersion = v;
-      await loadPdf(st.pdf);
+      await loadPdf(st.pdf, !!st.keepView);
     } else {
       pages.forEach((p) => p.mounted && redrawInk(p));
     }
@@ -207,9 +207,9 @@
   }
 
   // ---------- PDF i strony ----------
-  async function loadPdf(info) {
-    // Gdy zapiski zostały (doklejono strony), zostań w tym samym miejscu dokumentu.
-    const prevScroll = strokes.size ? viewer.scrollTop : 0;
+  async function loadPdf(info, keepView) {
+    // Po wstawieniu/usunięciu stron zostań w tym samym miejscu; nowy dokument zaczyna się od góry.
+    const prevScroll = keepView ? viewer.scrollTop : 0;
     teardownPages();
     pdfDoc && pdfDoc.destroy();
     pdfDoc = null;
@@ -230,6 +230,8 @@
         Array.from({ length: doc.numPages }, (_, i) => doc.getPage(i + 1))
       );
       if (info.version !== pdfVersion) return;
+      // Między stronami (oraz przed pierwszą i po ostatniej) są przyciski „+” do wstawiania stron.
+      pagesEl.appendChild(insertGap(0));
       pages = pdfPages.map((pdfPage, index) => {
         const vp = pdfPage.getViewport({ scale: 1 });
         const el = document.createElement('div');
@@ -237,6 +239,7 @@
         el.dataset.index = index;
         el.dataset.n = index + 1;
         pagesEl.appendChild(el);
+        pagesEl.appendChild(insertGap(index + 1));
         return { index, el, pdfPage, baseW: vp.width, aspect: vp.height / vp.width, mounted: false, gen: 0 };
       });
       layout();
@@ -250,6 +253,19 @@
     } finally {
       $('#loading').hidden = true;
     }
+  }
+
+  function insertGap(at) {
+    const gap = document.createElement('div');
+    gap.className = 'gap';
+    const b = document.createElement('button');
+    b.className = 'insert';
+    b.dataset.at = at;
+    b.title = 'Wstaw tutaj stronę';
+    b.setAttribute('aria-label', 'Wstaw tutaj stronę');
+    b.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>';
+    gap.appendChild(b);
+    return gap;
   }
 
   function teardownPages() {
@@ -507,12 +523,45 @@
   }
   $('#undo').onclick = undo;
 
+  // Kosz: wyczyść zapiski na bieżącej stronie albo usuń całą stronę.
+  const pageDialog = $('#pageDialog');
+  let dialogPage = 0;
   $('#clear').onclick = () => {
     if (!pages.length) return;
-    if (!confirm(`Wyczyścić wszystkie zapiski na stronie ${currentPage + 1}?`)) return;
-    clearPageLocal(currentPage);
-    socket.emit('page:clear', currentPage);
+    dialogPage = currentPage;
+    $('#pageDialogTitle').textContent = `Strona ${dialogPage + 1}`;
+    $('#pageDelete').disabled = pages.length < 2;
+    pageDialog.showModal();
   };
+  $('#pageClear').onclick = () => {
+    pageDialog.close();
+    clearPageLocal(dialogPage);
+    socket.emit('page:clear', dialogPage);
+  };
+  $('#pageDelete').onclick = () => { pageDialog.close(); deletePage(dialogPage); };
+  $('#pageCancel').onclick = () => pageDialog.close();
+
+  // „+” między stronami: pusta strona albo zdjęcia/PDF w wybranym miejscu.
+  const insertDialog = $('#insertDialog');
+  let insertAt = 0;
+  let pendingInsertAt = null; // ustawione, gdy wybór plików ma trafić w konkretne miejsce
+  pagesEl.addEventListener('click', (e) => {
+    const b = e.target.closest('.insert');
+    if (!b || !pdfDoc) return;
+    insertAt = +b.dataset.at;
+    $('#insertTitle').textContent =
+      insertAt === 0 ? 'Wstaw przed stroną 1'
+        : insertAt >= pages.length ? `Wstaw na końcu (po stronie ${pages.length})`
+          : `Wstaw między stroną ${insertAt} a ${insertAt + 1}`;
+    insertDialog.showModal();
+  });
+  $('#insertBlank').onclick = () => { insertDialog.close(); insertPages(insertAt, ['blank']); };
+  $('#insertFiles').onclick = () => {
+    insertDialog.close();
+    pendingInsertAt = insertAt;
+    fileInput.click(); // w tym samym kliknięciu – inaczej iPad nie otworzy wyboru plików
+  };
+  $('#insertCancel').onclick = () => insertDialog.close();
 
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
@@ -525,8 +574,10 @@
 
   // ---------- wgrywanie PDF i link ----------
   const fileInput = $('#fileInput');
-  $('#upload').onclick = () => fileInput.click();
-  $('#emptyUpload').onclick = () => fileInput.click();
+  $('#upload').onclick = $('#emptyUpload').onclick = () => {
+    pendingInsertAt = null;
+    fileInput.click();
+  };
 
   // Można wybrać PDF-y i/lub zdjęcia (kilka naraz). Zdjęcia są zamieniane na strony PDF w przeglądarce.
   const MAX_IMAGE_SIDE = 2400;  // dłuższy bok zdjęcia w pikselach (zdjęcia z telefonu są zmniejszane)
@@ -538,69 +589,131 @@
   fileInput.addEventListener('change', async () => {
     const files = Array.from(fileInput.files);
     fileInput.value = '';
+    const at = pendingInsertAt;
+    pendingInsertAt = null;
     if (!files.length) return;
+
+    if (at !== null && pdfDoc) { insertPages(at, files); return; }
 
     let mode = 'replace';
     if (pdfDoc) {
       mode = await askUploadMode();
       if (mode === 'cancel') return;
     }
+    if (mode === 'append') { insertPages(pages.length, files); return; }
 
     try {
       let blob = files[0];
       let name = files[0].name;
-      const oldCount = pages.length;
-      if (mode === 'append') {
-        toast('Przygotowuję strony…', 60000);
-        const current = await fetch(`/api/room/${roomId}/pdf?v=${pdfInfo.version}`).then((r) => r.blob());
-        blob = await buildPdf([current, ...files]);
-        name = pdfInfo.name;
-      } else if (files.length > 1 || !isPdfFile(files[0])) {
+      if (files.length > 1 || !isPdfFile(files[0])) {
         toast('Przygotowuję strony…', 60000);
         blob = await buildPdf(files);
         name = files.length === 1 ? files[0].name.replace(/\.[^.]+$/, '') + '.pdf' : `Tablica ${new Date().toISOString().slice(0, 10)}.pdf`;
       }
-      if (mode === 'append') jumpToPage = oldCount; // po wczytaniu przewiń do pierwszej nowej strony
-      await uploadPdf(blob, name, mode === 'append');
+      await uploadPdf(blob, name, '', 'Wgrane');
     } catch (err) {
-      jumpToPage = null;
       console.error(err);
       toast(err.userMessage || 'Nie udało się przygotować plików');
     }
   });
 
-  function uploadPdf(blob, name, keep) {
+  function uploadPdf(blob, name, query, doneMessage) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/room/${roomId}/pdf${keep ? '?keep=1' : ''}`);
+      xhr.open('POST', `/api/room/${roomId}/pdf${query ? '?' + query : ''}`);
       xhr.setRequestHeader('Content-Type', 'application/pdf');
       xhr.setRequestHeader('X-File-Name', encodeURIComponent(name));
       xhr.upload.onprogress = (e) => e.lengthComputable && toast(`Wysyłanie… ${Math.round(e.loaded / e.total * 100)}%`, 60000);
       xhr.onload = () => {
-        if (xhr.status === 200) { toast('Wgrane'); resolve(); }
-        else reject(Object.assign(new Error(xhr.responseText), { userMessage: 'Błąd: ' + xhr.responseText }));
+        if (xhr.status === 200) { toast(doneMessage); resolve(); }
+        else reject(Object.assign(new Error(xhr.responseText), { userMessage: xhr.responseText || 'Błąd serwera' }));
       };
       xhr.onerror = () => reject(Object.assign(new Error('network'), { userMessage: 'Nie udało się wysłać pliku' }));
       xhr.send(blob);
     });
   }
 
+  async function loadPdfLib() {
+    if (!window.PDFLib) await loadScript('/vendor/pdf-lib/pdf-lib.min.js');
+    return window.PDFLib;
+  }
+
+  // Dodaje do dokumentu `out` strony z pliku: wszystkie strony PDF-a albo jedno zdjęcie o szerokości `width`.
+  async function addFilePages(out, f, width) {
+    if (isPdfFile(f)) {
+      const src = await PDFLib.PDFDocument.load(await f.arrayBuffer(), { ignoreEncryption: true });
+      const copied = await out.copyPages(src, src.getPageIndices());
+      copied.forEach((p) => out.addPage(p));
+    } else {
+      const img = await out.embedJpg(await imageToJpeg(f));
+      const h = width * img.height / img.width;
+      out.addPage([width, h]).drawImage(img, { x: 0, y: 0, width, height: h });
+    }
+  }
+
   // Skleja pliki (PDF-y i zdjęcia) w jeden PDF, w kolejności wyboru.
   async function buildPdf(files) {
-    if (!window.PDFLib) await loadScript('/vendor/pdf-lib/pdf-lib.min.js');
+    await loadPdfLib();
     const out = await PDFLib.PDFDocument.create();
-    for (const f of files) {
-      if (isPdfFile(f)) {
-        const src = await PDFLib.PDFDocument.load(await f.arrayBuffer(), { ignoreEncryption: true });
-        const copied = await out.copyPages(src, src.getPageIndices());
-        copied.forEach((p) => out.addPage(p));
-      } else {
-        const img = await out.embedJpg(await imageToJpeg(f));
-        const h = IMAGE_PAGE_WIDTH * img.height / img.width;
-        out.addPage([IMAGE_PAGE_WIDTH, h]).drawImage(img, { x: 0, y: 0, width: IMAGE_PAGE_WIDTH, height: h });
-      }
-    }
+    for (const f of files) await addFilePages(out, f, IMAGE_PAGE_WIDTH);
     return new Blob([await out.save()], { type: 'application/pdf' });
+  }
+
+  // Wspólne dla wstawiania i usuwania stron: pobiera aktualny PDF, pozwala go zmienić i wysyła z powrotem.
+  // Serwer przesuwa zapiski razem ze stronami; `base` chroni przed nadpisaniem cudzej, równoczesnej zmiany.
+  let structureBusy = false;
+  async function changePages(prepare, query, doneMessage, jumpTo) {
+    if (structureBusy || !pdfInfo) return;
+    structureBusy = true;
+    const base = pdfInfo.version;
+    try {
+      toast('Przygotowuję strony…', 60000);
+      await loadPdfLib();
+      const bytes = await fetch(`/api/room/${roomId}/pdf?v=${base}`).then((r) => r.arrayBuffer());
+      const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+      const { doc, extra } = await prepare(src);
+      const blob = new Blob([await doc.save()], { type: 'application/pdf' });
+      jumpToPage = jumpTo;
+      await uploadPdf(blob, pdfInfo.name, `${query(extra)}&base=${base}`, doneMessage);
+    } catch (err) {
+      jumpToPage = null;
+      console.error(err);
+      toast(err.userMessage || 'Nie udało się zmienić stron');
+    } finally {
+      structureBusy = false;
+    }
+  }
+
+  // Wstawia przed stroną `at` (at = liczba stron: na końcu) pustą stronę ('blank') i/lub pliki.
+  function insertPages(at, items) {
+    // Pusta strona i zdjęcia mają szerokość sąsiedniej strony (pusta także jej wysokość).
+    const ref = pages[Math.min(Math.max(at - 1, 0), pages.length - 1)];
+    const refW = ref.baseW, refH = ref.baseW * ref.aspect;
+    const range = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
+
+    return changePages(async (src) => {
+      const n = src.getPageCount();
+      const out = await PDFLib.PDFDocument.create();
+      const copyRange = async (from, to) => {
+        if (to <= from) return;
+        (await out.copyPages(src, range(from, to))).forEach((p) => out.addPage(p));
+      };
+      await copyRange(0, at);
+      for (const item of items) {
+        if (item === 'blank') out.addPage([refW, refH]);
+        else await addFilePages(out, item, refW);
+      }
+      const added = out.getPageCount() - at;
+      await copyRange(at, n);
+      return { doc: out, extra: added };
+    }, (added) => `insertAt=${at}&count=${added}`, items[0] === 'blank' ? 'Dodano pustą stronę' : 'Wstawiono strony', at);
+  }
+
+  function deletePage(i) {
+    return changePages(async (src) => {
+      src.removePage(i);
+      return { doc: src };
+    }, () => `deletePage=${i}`, `Usunięto stronę ${i + 1}`, Math.max(0, Math.min(i, pages.length - 2)));
   }
 
   async function imageToJpeg(file) {
@@ -757,7 +870,7 @@
   viewer.addEventListener('contextmenu', (e) => e.preventDefault());
 
   viewer.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('#empty')) return;
+    if (e.target.closest('#empty, button')) return; // np. „+” między stronami – zwykłe kliknięcie
     if (e.pointerType === 'pen') {
       penBusyUntil = Infinity;
       cancelTouches();

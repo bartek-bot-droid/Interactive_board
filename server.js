@@ -75,14 +75,38 @@ app.post('/api/room/:id/pdf', express.raw({ type: '*/*', limit: MAX_PDF_MB + 'mb
     return res.status(400).send('To nie jest plik PDF');
   }
   const room = getRoom(id);
+
+  // Zmiana stron w istniejącej tablicy (zapiski zostają, ale przesuwają się razem ze stronami):
+  //   insertAt=N&count=K – wstawiono K stron przed stroną N (N = liczba stron: doklejenie na końcu),
+  //   deletePage=N       – usunięto stronę N.
+  // base = wersja PDF-a, z której klient zbudował nowy plik; jeśli ktoś w międzyczasie coś zmienił, odrzucamy.
+  const int = (v) => (v === undefined ? NaN : Number.parseInt(v, 10));
+  const insertAt = int(req.query.insertAt), count = int(req.query.count), del = int(req.query.deletePage);
+  const isInsert = insertAt >= 0 && count > 0 && count <= 2000;
+  const isDelete = del >= 0;
+  if (isInsert || isDelete) {
+    if (!room.pdf || room.pdf.version !== Number(req.query.base)) {
+      return res.status(409).send('Tablica zmieniła się w międzyczasie – spróbuj jeszcze raz');
+    }
+  }
+  if (room.uploading) return res.status(409).send('Trwa wgrywanie innego pliku – spróbuj za chwilę');
+  room.uploading = true;
+
   fs.writeFile(pdfFile(id), body, (err) => {
+    room.uploading = false;
     if (err) return res.status(500).send('Nie udało się zapisać pliku');
     const name = String(req.get('X-File-Name') || 'dokument.pdf').slice(0, 200);
     room.pdf = { version: Date.now(), name: decodeURIComponent(name) };
-    // keep=1: nowe strony doklejone na końcu, więc dotychczasowe zapiski zostają na swoich stronach
-    if (req.query.keep !== '1') room.strokes = [];
+    if (isDelete) {
+      room.strokes = room.strokes.filter((s) => s.page !== del);
+      for (const s of room.strokes) if (s.page > del) s.page--;
+    } else if (isInsert) {
+      for (const s of room.strokes) if (s.page >= insertAt) s.page += count;
+    } else {
+      room.strokes = []; // nowy dokument
+    }
     scheduleSave(room);
-    io.to(id).emit('state', roomState(room));
+    io.to(id).emit('state', { ...roomState(room), keepView: isInsert || isDelete });
     res.json(room.pdf);
   });
 });

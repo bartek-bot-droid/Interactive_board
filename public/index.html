@@ -26,7 +26,7 @@
       <button id="undo" title="Cofnij moją ostatnią kreskę (Ctrl+Z)" aria-label="Cofnij">
         <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
       </button>
-      <button id="clear" title="Wyczyść bieżącą stronę" aria-label="Wyczyść stronę">
+      <button id="clear" title="Wyczyść lub usuń bieżącą stronę" aria-label="Wyczyść lub usuń stronę">
         <svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
       <button id="finger" class="toggle" title="Rysowanie palcem (wyłączone: palec przewija, rysik pisze)" aria-label="Rysowanie palcem" aria-pressed="false">
@@ -74,15 +74,37 @@
 
   <input id="fileInput" type="file" accept="application/pdf,.pdf,image/*" multiple hidden>
 
-  <dialog id="uploadDialog">
+  <dialog id="uploadDialog" class="sheet">
     <form method="dialog">
       <h2>Co zrobić z wybranymi plikami?</h2>
       <button value="append" class="primary">Dodaj na końcu tablicy</button>
-      <p>Obecne strony i zapiski zostają.</p>
+      <p>Obecne strony i zapiski zostają. Żeby wstawić w środek, użyj „+” między stronami.</p>
       <button value="replace" class="danger">Zastąp całą tablicę</button>
       <p>Obecne strony i wszystkie zapiski zostaną usunięte.</p>
       <button value="cancel" class="plain">Anuluj</button>
     </form>
+  </dialog>
+
+  <dialog id="insertDialog" class="sheet">
+    <div class="form">
+      <h2 id="insertTitle">Wstaw stronę</h2>
+      <button type="button" id="insertBlank" class="primary">Pusta strona na notatki</button>
+      <p>Biała strona w rozmiarze sąsiedniej.</p>
+      <button type="button" id="insertFiles" class="secondary">Zdjęcia lub PDF…</button>
+      <p>Wybierz jedno lub kilka zdjęć albo plik PDF – trafią w to miejsce.</p>
+      <button type="button" id="insertCancel" class="plain">Anuluj</button>
+    </div>
+  </dialog>
+
+  <dialog id="pageDialog" class="sheet">
+    <div class="form">
+      <h2 id="pageDialogTitle">Strona</h2>
+      <button type="button" id="pageClear" class="secondary">Wyczyść zapiski na tej stronie</button>
+      <p>Strona zostaje, znikają tylko kreski.</p>
+      <button type="button" id="pageDelete" class="danger">Usuń całą stronę</button>
+      <p>Strona znika z tablicy razem z zapiskami – u Ciebie i u ucznia.</p>
+      <button type="button" id="pageCancel" class="plain">Anuluj</button>
+    </div>
   </dialog>
   <input id="colorInput" type="color" tabindex="-1" aria-hidden="true">
   <div id="toast" role="status"></div>
