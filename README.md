@@ -47,7 +47,18 @@ Folder na NAS: `docker/tablica` z plikami `docker-compose.yml`, `package.json`, 
 ### Aktualizacja na NAS
 
 1. W File Station **usuń** stare wersje zmienionych plików i **wgraj nowe** (samo „nadpisz” bywa pomijane).
+   Po wgraniu porównaj rozmiary plików z tymi na komputerze.
 2. Container Manager → Projekt → tablica → **Akcja → Uruchom ponownie**.
+   „Kompilacja” nie jest potrzebna (i nie wczytuje nowych plików).
+
+### Do wgrania przy następnej aktualizacji NAS
+
+Zmiany gotowe w repozytorium, ale jeszcze **niewgrane na NAS** – dołącz je do najbliższej aktualizacji:
+
+- [ ] `server.js` (14.3 KB, 25.10.2026) – czyste zamykanie: przy „Uruchom ponownie” / restarcie NAS-a
+  tablica zapisuje świeże kreski i kończy się bez błędu (znika komunikat „Nieoczekiwane zatrzymanie kontenera”).
+
+Po wgraniu odhacz pozycję albo usuń ją z listy.
 
 ## Uruchomienie na własnym komputerze (do testów)
 
