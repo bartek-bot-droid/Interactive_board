@@ -47,20 +47,34 @@ function getRoom(id) {
   return room;
 }
 
+const roomJson = (room) => JSON.stringify({
+  title: room.title, createdAt: room.createdAt, updatedAt: room.updatedAt,
+  pdf: room.pdf, strokes: room.strokes,
+});
+
 function writeRoom(room) {
-  const data = JSON.stringify({
-    title: room.title, createdAt: room.createdAt, updatedAt: room.updatedAt,
-    pdf: room.pdf, strokes: room.strokes,
-  });
-  fs.writeFile(jsonFile(room.id), data, (err) => err && console.error('Zapis nieudany', err));
+  fs.writeFile(jsonFile(room.id), roomJson(room), (err) => err && console.error('Zapis nieudany', err));
 }
 
 function scheduleSave(room) {
   if (room.deleted) return;
   room.updatedAt = Date.now();
   clearTimeout(room.saveTimer);
-  room.saveTimer = setTimeout(() => writeRoom(room), 1500);
+  room.saveTimer = setTimeout(() => { room.saveTimer = null; writeRoom(room); }, 1500);
 }
+
+// „Uruchom ponownie” / restart NAS-a wysyła SIGTERM: zapisz zaległe zmiany i zakończ się czysto
+// (bez tego Docker po 10 s zabija proces, a Synology pokazuje „nieoczekiwane zatrzymanie”).
+function shutdown() {
+  for (const room of rooms.values()) {
+    if (!room.saveTimer || room.deleted) continue;
+    clearTimeout(room.saveTimer);
+    try { fs.writeFileSync(jsonFile(room.id), roomJson(room)); } catch (err) { console.error('Zapis nieudany', err); }
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 const roomState = (room) => ({ title: room.title, pdf: room.pdf, strokes: room.strokes });
 
