@@ -183,13 +183,15 @@ button.primary,
   font-size: 28px;
   font-weight: 600;
 }
-.page canvas {
+.page canvas,
+.page img.bg {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   display: block;
 }
+.page img.bg { object-fit: fill; -webkit-user-drag: none; pointer-events: none; }
 #pages.erasing .page { cursor: cell; }
 
 #empty, #loading {
@@ -235,6 +237,29 @@ dialog.sheet button.plain { color: var(--muted); margin-top: 4px; }
 dialog.sheet p { margin: 6px 4px 14px; font-size: 13px; color: var(--muted); }
 
 #colorInput { position: fixed; left: 12px; top: 12px; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
+
+#empty button.plain { background: none; color: var(--muted); font-weight: 500; margin-top: 6px; }
+
+/* Postęp pobierania/wysyłania – zostaje na ekranie, dopóki praca trwa */
+#status {
+  position: fixed;
+  left: 50%;
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  background: var(--bar);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .12);
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  z-index: 19;
+  pointer-events: none;
+  white-space: nowrap;
+}
+#status[hidden] { display: none; }
 
 #toast {
   position: fixed;

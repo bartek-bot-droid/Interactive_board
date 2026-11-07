@@ -13,8 +13,7 @@
   const MIN_ZOOM = 0.5, MAX_ZOOM = 4;
   const MAX_CANVAS_PIXELS = 4.5e6; // limit pamięci na iPadzie
   const SEND_INTERVAL = 30;        // ms między paczkami punktów
-
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
+  const A4 = { w: 595, h: 842 };   // rozmiar pustej strony, gdy nie ma sąsiedniej (punkty PDF)
 
   const $ = (s) => document.querySelector(s);
   const viewer = $('#viewer');
@@ -22,7 +21,7 @@
 
   // ---------- identyfikator tablicy w adresie ----------
   const params = new URLSearchParams(location.search);
-  let roomId = (params.get('b') || '').toLowerCase();
+  const roomId = (params.get('b') || '').toLowerCase();
   if (!/^[a-z0-9]{4,32}$/.test(roomId)) {
     // Bez kodu tablicy: lista tablic nauczyciela (chroniona PIN-em).
     location.replace('/tablice.html');
@@ -37,18 +36,92 @@
     return Array.from(bytes, (b) => abc[b % abc.length]).join('');
   }
 
+  // ---------- pdf.js – wczytywany w tle, żeby nie opóźniać pokazania tablicy ----------
+  let pdfjsReady = null;
+  let pdfWorker = null;
+  function pdfjs() {
+    if (!pdfjsReady) {
+      pdfjsReady = loadScript('/vendor/pdfjs/pdf.min.js').then(() => {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
+        pdfWorker = new pdfjsLib.PDFWorker(); // od razu zaczyna pobierać „silnik” PDF
+        return pdfjsLib;
+      });
+      pdfjsReady.catch(() => { pdfjsReady = null; });
+    }
+    return pdfjsReady;
+  }
+  pdfjs();
+
+  const PDF_OPTIONS = {
+    cMapUrl: '/vendor/cmaps/',
+    cMapPacked: true,
+    standardFontDataUrl: '/vendor/fonts/',
+  };
+  const assetUrl = (a) => `/api/room/${roomId}/asset/${a}`;
+
+  // Pamięć plików na tym urządzeniu: PDF pobrany raz (albo wgrany stąd) przy następnym otwarciu
+  // tablicy wczytuje się bez internetu. Pliki o danym id nigdy się nie zmieniają, więc to bezpieczne.
+  // Działa tylko na stronie https (np. adres Tailscale); w sieci domowej i tak jest szybko.
+  const FILE_CACHE = 'tablica-pliki-v1';
+  const canCache = window.isSecureContext && 'caches' in window;
+  async function cachedBytes(a) {
+    if (!canCache) return null;
+    try {
+      const r = await (await caches.open(FILE_CACHE)).match(assetUrl(a));
+      return r ? new Uint8Array(await r.arrayBuffer()) : null;
+    } catch { return null; }
+  }
+  function rememberFile(a, body, type) {
+    if (!canCache) return;
+    caches.open(FILE_CACHE)
+      .then((c) => c.put(assetUrl(a), new Response(body, { headers: { 'Content-Type': type } })))
+      .catch(() => { /* brak miejsca – trudno, pobierze się następnym razem */ });
+  }
+
+  // Dokumenty PDF (po jednym na plik). Plik spoza pamięci jest pobierany kawałkami: najpierw to,
+  // co potrzebne do widocznych stron, reszta w tle.
+  const pdfDocs = new Map();     // assetId -> Promise<PDFDocumentProxy>
+  const localImages = new Map(); // assetId -> adres obrazka z pamięci (zdjęcia wgrane z tego urządzenia)
+  function getPdfDoc(a) {
+    if (!pdfDocs.has(a)) {
+      const p = pdfjs().then(async (lib) => {
+        const cached = await cachedBytes(a);
+        if (cached) return lib.getDocument({ ...PDF_OPTIONS, data: cached, worker: pdfWorker }).promise;
+
+        const task = lib.getDocument({
+          ...PDF_OPTIONS,
+          url: assetUrl(a),
+          worker: pdfWorker,
+          disableStream: true,     // tylko potrzebne fragmenty, a nie cały plik naraz
+          rangeChunkSize: 262144,  // większe kawałki = mniej zapytań przez wolne łącze
+        });
+        task.onProgress = ({ loaded, total }) => {
+          if (total) setStatus(`Pobieranie PDF… ${Math.min(99, Math.round(loaded / total * 100))}%`, 'pdf:' + a);
+        };
+        const doc = await task.promise.finally(() => clearStatus('pdf:' + a));
+        // Gdy w tle dojdzie reszta pliku, zapisz go na następny raz.
+        if (canCache) doc.getData().then((bytes) => rememberFile(a, bytes, 'application/pdf')).catch(() => {});
+        return doc;
+      });
+      p.catch(() => pdfDocs.delete(a));
+      pdfDocs.set(a, p);
+    }
+    return pdfDocs.get(a);
+  }
+
   // ---------- stan ----------
-  let pdfDoc = null;
-  let pdfVersion;                 // undefined = jeszcze nic nie wczytano
-  let pdfInfo = null;             // { version, name }
+  let docName = '';               // nazwa pierwszego wgranego pliku
   let boardTitle = '';            // nazwa nadana na liście tablic
-  let pages = [];                 // { index, el, pdfPage, baseW, aspect, mounted, pdfCanvas, ink, task, gen }
+  let pages = [];                 // strony w kolejności: { id, desc, index, el, aspect, baseW, mounted, ink, ... }
+  const pageById = new Map();
   const strokes = new Map();      // id -> stroke
-  const byPage = new Map();       // nr strony -> [stroke]
+  const byPage = new Map();       // id strony -> [stroke]
   const myStrokes = [];           // moje kreski – do cofania
+  let joined = false;
   let zoom = 1;
   let lastViewerWidth = viewer.clientWidth;
   let currentPage = 0;
+  let jumpToId = null;            // po najbliższym ułożeniu stron przewiń do tej strony
   let colors = loadColors();
   let tool = 'pen';               // 'pen' | 'eraser'
   let colorIndex = loadNumber('tablica.color', 1, colors.length);
@@ -57,6 +130,10 @@
 
   // ---------- socket ----------
   const socket = io({ transports: ['websocket', 'polling'] });
+  const loadingEl = $('#loading');
+  const connectHint = setTimeout(() => {
+    if (!joined) loadingEl.textContent = 'Łączenie trwa dłużej niż zwykle… (sprawdź internet)';
+  }, 8000);
 
   socket.on('connect', () => {
     $('#conn').classList.add('on');
@@ -64,36 +141,57 @@
     socket.emit('view', currentPage);
   });
   socket.on('disconnect', () => $('#conn').classList.remove('on'));
+  socket.on('connect_error', () => {
+    if (!joined) loadingEl.textContent = 'Nie mogę połączyć się z tablicą – próbuję dalej…';
+  });
   socket.on('title', (t) => { boardTitle = t || ''; updateTitle(); });
 
   function updateTitle() {
-    const name = boardTitle || (pdfInfo ? pdfInfo.name.replace(/\.pdf$/i, '') : '');
+    const name = boardTitle || docName.replace(/\.pdf$/i, '');
     document.title = name ? name + ' – Tablica PDF' : 'Tablica PDF';
   }
 
   // Przycisk powrotu do listy widzi tylko nauczyciel (urządzenie zalogowane PIN-em).
-  try { if (localStorage.getItem('tablica.teacherToken')) $('#boards').hidden = false; } catch { /* brak */ }
+  let teacherToken = '';
+  try { teacherToken = localStorage.getItem('tablica.teacherToken') || ''; } catch { /* brak */ }
+  if (teacherToken) $('#boards').hidden = false;
 
-  // Darmowy Render usypia serwer po 15 min bez zapytań HTTP (i kasuje wtedy tablice),
-  // więc dopóki tablica jest otwarta, co 4 minuty dajemy znać, że ktoś z niej korzysta.
+  // Adres dla ucznia: w sieci domowej (szybki adres NAS-a) „Link” podaje adres internetowy tablicy.
+  const onLocalAddress = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname);
+  let publicOrigin = onLocalAddress ? null : location.origin;
+  if (onLocalAddress) {
+    fetch('/api/admin/public-url').then((r) => r.json()).then(({ url }) => { publicOrigin = url; }).catch(() => {});
+  } else if (teacherToken && location.protocol === 'https:') {
+    fetch('/api/admin/public-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Teacher-Token': teacherToken },
+      body: JSON.stringify({ url: location.origin }),
+    }).catch(() => {});
+  }
+
+  // Co 4 minuty krótkie zapytanie – podtrzymuje połączenie, dopóki tablica jest otwarta.
   setInterval(() => fetch('/api/ping', { cache: 'no-store' }).catch(() => {}), 4 * 60 * 1000);
 
-  socket.on('state', async (st) => {
+  socket.on('state', (st) => {
     strokes.clear();
     byPage.clear();
     for (const s of st.strokes) addStroke(s);
     for (let i = myStrokes.length - 1; i >= 0; i--) if (!strokes.has(myStrokes[i])) myStrokes.splice(i, 1);
-
-    pdfInfo = st.pdf;
     boardTitle = st.title || '';
+    docName = st.name || '';
     updateTitle();
-    const v = st.pdf ? st.pdf.version : null;
-    if (v !== pdfVersion) {
-      pdfVersion = v;
-      await loadPdf(st.pdf, !!st.keepView);
-    } else {
-      pages.forEach((p) => p.mounted && redrawInk(p));
-    }
+
+    const first = !joined;
+    joined = true;
+    clearTimeout(connectHint);
+    loadingEl.hidden = true;
+    applyPages(st.pages, { reset: first || !!st.reset });
+    pages.forEach((p) => p.mounted && redrawInk(p));
+  });
+
+  socket.on('pages', ({ pages: list, name }) => {
+    if (name) { docName = name; updateTitle(); }
+    applyPages(list);
   });
 
   socket.on('stroke:begin', (s) => {
@@ -108,7 +206,7 @@
     markStroke(s);
   });
   socket.on('stroke:remove', (id) => removeStroke(id));
-  socket.on('page:clear', (page) => clearPageLocal(page));
+  socket.on('page:clear', (pageId) => clearPageLocal(pageId));
 
   socket.on('peers', (list) => {
     const box = $('#peers');
@@ -122,6 +220,17 @@
       box.appendChild(b);
     });
   });
+
+  // Wysyła zmianę stron i czeka na potwierdzenie serwera.
+  function emitAck(event, data) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ error: 'Serwer nie odpowiada – spróbuj jeszcze raz' }), 20000);
+      socket.emit(event, data, (res) => { clearTimeout(timer); resolve(res || {}); });
+    });
+  }
+
+  // Po odrzuconej zmianie pobierz od serwera aktualny stan tablicy.
+  const resync = () => socket.emit('join', roomId);
 
   // ---------- kreski ----------
   function addStroke(s) {
@@ -140,10 +249,10 @@
     markPage(s.page);
   }
 
-  function clearPageLocal(page) {
-    for (const s of byPage.get(page) || []) strokes.delete(s.id);
-    byPage.delete(page);
-    markPage(page);
+  function clearPageLocal(pageId) {
+    for (const s of byPage.get(pageId) || []) strokes.delete(s.id);
+    byPage.delete(pageId);
+    markPage(pageId);
   }
 
   // Rysowanie odbywa się raz na klatkę: albo całą stronę od nowa, albo tylko nowe odcinki kresek.
@@ -151,7 +260,7 @@
   const dirtyStrokes = new Set();
   let frameRequested = false;
 
-  function markPage(i) { dirtyPages.add(i); requestFrame(); }
+  function markPage(id) { dirtyPages.add(id); requestFrame(); }
   function markStroke(s) { dirtyStrokes.add(s); requestFrame(); }
   function requestFrame() {
     if (frameRequested) return;
@@ -160,9 +269,12 @@
   }
   function flushFrame() {
     frameRequested = false;
-    for (const i of dirtyPages) if (pages[i] && pages[i].mounted) redrawInk(pages[i]);
+    for (const id of dirtyPages) {
+      const p = pageById.get(id);
+      if (p && p.mounted) redrawInk(p);
+    }
     for (const s of dirtyStrokes) {
-      const p = pages[s.page];
+      const p = pageById.get(s.page);
       if (!p || !p.mounted || dirtyPages.has(s.page) || !strokes.has(s.id)) continue;
       const ctx = p.ink.getContext('2d');
       drawStroke(ctx, s, s._drawn, p.ink.width);
@@ -176,7 +288,7 @@
     const ctx = p.ink.getContext('2d');
     ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, p.ink.width, p.ink.height);
-    for (const s of byPage.get(p.index) || []) {
+    for (const s of byPage.get(p.id) || []) {
       drawStroke(ctx, s, 0, p.ink.width);
       s._drawn = s.pts.length / 2;
     }
@@ -206,53 +318,76 @@
     ctx.stroke();
   }
 
-  // ---------- PDF i strony ----------
-  async function loadPdf(info, keepView) {
-    // Po wstawieniu/usunięciu stron zostań w tym samym miejscu; nowy dokument zaczyna się od góry.
-    const prevScroll = keepView ? viewer.scrollTop : 0;
-    teardownPages();
-    pdfDoc && pdfDoc.destroy();
-    pdfDoc = null;
-    $('#empty').hidden = !!info;
-    if (!info) { updatePageInfo(); return; }
+  // ---------- strony ----------
+  // Lista stron przychodzi z serwera (albo od razu z tego urządzenia, np. po dodaniu pustej strony).
+  // Istniejące strony zostają na miejscu – razem z narysowaną już treścią – dochodzą tylko nowe.
+  const sameDesc = (a, b) => a.t === b.t && a.a === b.a && a.n === b.n && a.w === b.w && a.h === b.h;
 
-    $('#loading').hidden = false;
-    try {
-      const doc = await pdfjsLib.getDocument({
-        url: `/api/room/${roomId}/pdf?v=${info.version}`,
-        cMapUrl: '/vendor/cmaps/',
-        cMapPacked: true,
-        standardFontDataUrl: '/vendor/fonts/',
-      }).promise;
-      if (info.version !== pdfVersion) { doc.destroy(); return; }
-      pdfDoc = doc;
-      const pdfPages = await Promise.all(
-        Array.from({ length: doc.numPages }, (_, i) => doc.getPage(i + 1))
-      );
-      if (info.version !== pdfVersion) return;
-      // Między stronami (oraz przed pierwszą i po ostatniej) są przyciski „+” do wstawiania stron.
-      pagesEl.appendChild(insertGap(0));
-      pages = pdfPages.map((pdfPage, index) => {
-        const vp = pdfPage.getViewport({ scale: 1 });
-        const el = document.createElement('div');
-        el.className = 'page';
-        el.dataset.index = index;
-        el.dataset.n = index + 1;
-        pagesEl.appendChild(el);
-        pagesEl.appendChild(insertGap(index + 1));
-        return { index, el, pdfPage, baseW: vp.width, aspect: vp.height / vp.width, mounted: false, gen: 0 };
-      });
-      layout();
-      pages.forEach((p) => observer.observe(p.el));
-      viewer.scrollTop = prevScroll;
-      if (jumpToPage !== null) { goToPage(jumpToPage); jumpToPage = null; }
-      updateCurrentPage();
-    } catch (err) {
-      console.error(err);
-      toast('Nie udało się otworzyć PDF-a');
-    } finally {
-      $('#loading').hidden = true;
+  function applyPages(list, { reset = false } = {}) {
+    const anchor = reset ? null : captureAnchor();
+    const next = [];
+    for (const d of list) {
+      let p = pageById.get(d.id);
+      if (!p) {
+        p = { id: d.id, desc: d, aspect: d.h / d.w, baseW: d.w, mounted: false, gen: 0 };
+        p.el = document.createElement('div');
+        p.el.className = 'page';
+        p.el.dataset.id = d.id;
+        pageById.set(d.id, p);
+        observer.observe(p.el);
+      } else if (!sameDesc(p.desc, d)) {
+        const wasMounted = p.mounted;
+        unmount(p);
+        Object.assign(p, { desc: d, aspect: d.h / d.w, baseW: d.w, pdfPage: null });
+        if (wasMounted) mount(p); // nadal widoczna – obserwator nie zgłosi jej drugi raz
+      }
+      next.push(p);
     }
+    const keep = new Set(list.map((d) => d.id));
+    for (const p of pages) {
+      if (keep.has(p.id)) continue;
+      observer.unobserve(p.el);
+      unmount(p);
+      p.el.remove();
+      pageById.delete(p.id);
+    }
+    pages = next;
+    for (const id of [...byPage.keys()]) if (!pageById.has(id)) clearPageLocal(id);
+
+    // Kolejność na ekranie: „+”, strona 1, „+”, strona 2, …, „+”
+    pagesEl.querySelectorAll('.gap').forEach((g) => g.remove());
+    const frag = document.createDocumentFragment();
+    if (pages.length) frag.appendChild(insertGap(0));
+    pages.forEach((p, i) => {
+      p.index = i;
+      p.el.dataset.n = i + 1;
+      frag.appendChild(p.el);
+      frag.appendChild(insertGap(i + 1));
+    });
+    pagesEl.appendChild(frag);
+    $('#empty').hidden = pages.length > 0;
+
+    layout();
+    if (reset) viewer.scrollTop = 0;
+    else restoreAnchor(anchor);
+    if (jumpToId && pageById.has(jumpToId)) {
+      goToPage(pageById.get(jumpToId).index);
+      jumpToId = null;
+    }
+    updateCurrentPage();
+  }
+
+  // Zapamiętuje, która strona jest u góry ekranu – po zmianie listy stron widok się nie przesuwa.
+  function captureAnchor() {
+    const top = viewer.scrollTop;
+    for (const p of pages) {
+      if (p.el.offsetTop + p.el.offsetHeight > top) return { id: p.id, offset: top - p.el.offsetTop };
+    }
+    return null;
+  }
+  function restoreAnchor(anchor) {
+    const p = anchor && pageById.get(anchor.id);
+    if (p) viewer.scrollTop = p.el.offsetTop + anchor.offset;
   }
 
   function insertGap(at) {
@@ -266,12 +401,6 @@
     b.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>';
     gap.appendChild(b);
     return gap;
-  }
-
-  function teardownPages() {
-    pages.forEach((p) => { observer.unobserve(p.el); unmount(p); });
-    pages = [];
-    pagesEl.textContent = '';
   }
 
   const pageWidth = () => Math.max(200, Math.min(viewer.clientWidth - 2 * GUTTER, MAX_PAGE_WIDTH)) * zoom;
@@ -293,7 +422,7 @@
 
   const observer = new IntersectionObserver((entries) => {
     for (const e of entries) {
-      const p = pages[+e.target.dataset.index];
+      const p = pageById.get(e.target.dataset.id);
       if (!p || p.el !== e.target) continue;
       e.isIntersecting ? mount(p) : unmount(p);
     }
@@ -313,7 +442,8 @@
     p.gen++;
     if (p.task) p.task.cancel();
     for (const c of [p.pdfCanvas, p.ink]) if (c) { c.width = c.height = 0; c.remove(); }
-    p.pdfCanvas = p.ink = null;
+    if (p.bg) { p.bg.removeAttribute('src'); p.bg.remove(); }
+    p.pdfCanvas = p.ink = p.bg = null;
   }
 
   function canvasSize(p) {
@@ -326,19 +456,71 @@
     return [Math.round(w), Math.round(h)];
   }
 
+  // Strona PDF-a; przy okazji poprawia proporcje, jeśli zapisane różnią się od prawdziwych.
+  function getPdfPage(p) {
+    if (!p.pdfPage) {
+      const { a, n } = p.desc;
+      p.pdfPage = getPdfDoc(a).then((doc) => doc.getPage(n + 1)).then((pg) => {
+        const vp = pg.getViewport({ scale: 1 });
+        if (Math.abs(vp.height / vp.width - p.aspect) > 0.005) {
+          p.aspect = vp.height / vp.width;
+          relayoutSoon();
+        }
+        p.baseW = vp.width;
+        return pg;
+      });
+      p.pdfPage.catch(() => { p.pdfPage = null; });
+    }
+    return p.pdfPage;
+  }
+
+  let relayoutTimer = null;
+  function relayoutSoon() {
+    clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(() => {
+      const anchor = captureAnchor();
+      layout();
+      restoreAnchor(anchor);
+      rerenderSoon();
+    }, 50);
+  }
+
   async function renderPage(p) {
     const gen = ++p.gen;
     const [w, h] = canvasSize(p);
     p.ink.width = w;
     p.ink.height = h;
-    redrawInk(p);
+    redrawInk(p); // zapiski widać od razu, zanim dojdzie treść strony
 
+    const d = p.desc;
+    if (d.t === 'blank') return;
+    if (d.t === 'img') {
+      if (!p.bg) {
+        p.bg = new Image();
+        p.bg.className = 'bg';
+        p.bg.decoding = 'async';
+        p.bg.alt = '';
+        p.bg.src = localImages.get(d.a) || assetUrl(d.a);
+        p.el.insertBefore(p.bg, p.ink);
+      }
+      return;
+    }
+
+    let pdfPage;
+    try {
+      pdfPage = await getPdfPage(p);
+    } catch (err) {
+      console.error(err);
+      if (gen === p.gen) toast('Nie udało się wczytać strony PDF – odśwież tablicę');
+      return;
+    }
+    if (gen !== p.gen || !p.mounted) return;
     if (p.task) p.task.cancel();
     const c = document.createElement('canvas');
     c.width = w;
     c.height = h;
-    const viewport = p.pdfPage.getViewport({ scale: w / p.baseW });
-    const task = p.pdfPage.render({ canvasContext: c.getContext('2d'), viewport });
+    const viewport = pdfPage.getViewport({ scale: w / pdfPage.getViewport({ scale: 1 }).width });
+    const task = pdfPage.render({ canvasContext: c.getContext('2d'), viewport });
     p.task = task;
     try {
       await task.promise;
@@ -525,18 +707,18 @@
 
   // Kosz: wyczyść zapiski na bieżącej stronie albo usuń całą stronę.
   const pageDialog = $('#pageDialog');
-  let dialogPage = 0;
+  let dialogPage = null;
   $('#clear').onclick = () => {
     if (!pages.length) return;
-    dialogPage = currentPage;
-    $('#pageDialogTitle').textContent = `Strona ${dialogPage + 1}`;
+    dialogPage = pages[currentPage];
+    $('#pageDialogTitle').textContent = `Strona ${currentPage + 1}`;
     $('#pageDelete').disabled = pages.length < 2;
     pageDialog.showModal();
   };
   $('#pageClear').onclick = () => {
     pageDialog.close();
-    clearPageLocal(dialogPage);
-    socket.emit('page:clear', dialogPage);
+    clearPageLocal(dialogPage.id);
+    socket.emit('page:clear', dialogPage.id);
   };
   $('#pageDelete').onclick = () => { pageDialog.close(); deletePage(dialogPage); };
   $('#pageCancel').onclick = () => pageDialog.close();
@@ -547,7 +729,7 @@
   let pendingInsertAt = null; // ustawione, gdy wybór plików ma trafić w konkretne miejsce
   pagesEl.addEventListener('click', (e) => {
     const b = e.target.closest('.insert');
-    if (!b || !pdfDoc) return;
+    if (!b) return;
     insertAt = +b.dataset.at;
     $('#insertTitle').textContent =
       insertAt === 0 ? 'Wstaw przed stroną 1'
@@ -555,13 +737,14 @@
           : `Wstaw między stroną ${insertAt} a ${insertAt + 1}`;
     insertDialog.showModal();
   });
-  $('#insertBlank').onclick = () => { insertDialog.close(); insertPages(insertAt, ['blank']); };
+  $('#insertBlank').onclick = () => { insertDialog.close(); insertBlank(insertAt); };
   $('#insertFiles').onclick = () => {
     insertDialog.close();
     pendingInsertAt = insertAt;
     fileInput.click(); // w tym samym kliknięciu – inaczej iPad nie otworzy wyboru plików
   };
   $('#insertCancel').onclick = () => insertDialog.close();
+  $('#emptyBlank').onclick = () => insertBlank(0);
 
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
@@ -572,18 +755,42 @@
     else if (e.key.toLowerCase() === 'e') { tool = 'eraser'; renderTools(); }
   });
 
-  // ---------- wgrywanie PDF i link ----------
+  // ---------- dodawanie i usuwanie stron ----------
+  const round2 = (v) => Math.round(v * 100) / 100;
+  const descs = () => pages.map((p) => p.desc);
+
+  // Rozmiar sąsiedniej strony – pusta strona i zdjęcia dopasowują się do niego.
+  function neighbourSize(at) {
+    const ref = pages[Math.min(Math.max(at - 1, 0), pages.length - 1)];
+    return ref ? { w: ref.baseW, h: ref.baseW * ref.aspect } : A4;
+  }
+
+  // Pusta strona to tylko wpis na liście stron – pojawia się od razu, bez wysyłania plików.
+  async function insertBlank(at) {
+    const { w, h } = neighbourSize(at);
+    const page = { id: randomId(10), t: 'blank', w: round2(w), h: round2(h) };
+    const list = descs();
+    list.splice(at, 0, page);
+    jumpToId = page.id;
+    applyPages(list);
+    const res = await emitAck('pages:insert', { at, pages: [page] });
+    if (res.error) { toast(res.error); resync(); }
+  }
+
+  async function deletePage(p) {
+    applyPages(descs().filter((d) => d.id !== p.id));
+    const res = await emitAck('pages:delete', p.id);
+    if (res.error) { toast(res.error); resync(); } else toast(`Usunięto stronę ${p.index + 1}`);
+  }
+
   const fileInput = $('#fileInput');
   $('#upload').onclick = $('#emptyUpload').onclick = () => {
     pendingInsertAt = null;
     fileInput.click();
   };
 
-  // Można wybrać PDF-y i/lub zdjęcia (kilka naraz). Zdjęcia są zamieniane na strony PDF w przeglądarce.
-  const MAX_IMAGE_SIDE = 2400;  // dłuższy bok zdjęcia w pikselach (zdjęcia z telefonu są zmniejszane)
-  const IMAGE_PAGE_WIDTH = 595; // szerokość strony ze zdjęciem w punktach PDF (jak A4)
-  let jumpToPage = null;
-
+  // Zdjęcia są zmniejszane i zapisywane jako JPEG w przeglądarce – wysyła się kilkaset kB zamiast kilku MB.
+  const MAX_IMAGE_SIDE = 2000;
   const isPdfFile = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
 
   fileInput.addEventListener('change', async () => {
@@ -593,127 +800,84 @@
     pendingInsertAt = null;
     if (!files.length) return;
 
-    if (at !== null && pdfDoc) { insertPages(at, files); return; }
-
-    let mode = 'replace';
-    if (pdfDoc) {
-      mode = await askUploadMode();
-      if (mode === 'cancel') return;
-    }
-    if (mode === 'append') { insertPages(pages.length, files); return; }
-
-    try {
-      let blob = files[0];
-      let name = files[0].name;
-      if (files.length > 1 || !isPdfFile(files[0])) {
-        toast('Przygotowuję strony…', 60000);
-        blob = await buildPdf(files);
-        name = files.length === 1 ? files[0].name.replace(/\.[^.]+$/, '') + '.pdf' : `Tablica ${new Date().toISOString().slice(0, 10)}.pdf`;
-      }
-      await uploadPdf(blob, name, '', 'Wgrane');
-    } catch (err) {
-      console.error(err);
-      toast(err.userMessage || 'Nie udało się przygotować plików');
-    }
+    if (at !== null && pages.length) { addFiles(files, at); return; }
+    if (!pages.length) { addFiles(files, null); return; }
+    const mode = await askUploadMode();
+    if (mode === 'append') addFiles(files, pages.length);
+    else if (mode === 'replace') addFiles(files, null);
   });
 
-  function uploadPdf(blob, name, query, doneMessage) {
+  // Wgrywa pliki i wstawia ich strony przed pozycją `at` (null = zastąp całą tablicę).
+  // Każdy plik idzie na serwer raz; strony pokazują się od razu z pamięci tego urządzenia.
+  let adding = false;
+  async function addFiles(files, at) {
+    if (adding) { toast('Poczekaj – trwa dodawanie poprzednich plików'); return; }
+    adding = true;
+    try {
+      const width = at === null ? A4.w : neighbourSize(at).w;
+      const newPages = [];
+      let name = '';
+      for (const [k, f] of files.entries()) {
+        const of = files.length > 1 ? ` ${k + 1}/${files.length}` : '';
+        if (isPdfFile(f)) {
+          setStatus(`Czytam PDF${of}…`, 'add');
+          const lib = await pdfjs();
+          const doc = await lib.getDocument({ ...PDF_OPTIONS, data: new Uint8Array(await f.arrayBuffer()), worker: pdfWorker }).promise;
+          const sizes = [];
+          for (let i = 1; i <= doc.numPages; i++) {
+            const vp = (await doc.getPage(i)).getViewport({ scale: 1 });
+            sizes.push({ w: round2(vp.width), h: round2(vp.height) });
+          }
+          const { id } = await uploadAsset(f, `Wysyłanie PDF${of}`, doc.numPages);
+          pdfDocs.set(id, Promise.resolve(doc)); // już jest w pamięci – nie trzeba go pobierać z powrotem
+          rememberFile(id, f, 'application/pdf');
+          sizes.forEach((s, n) => newPages.push({ id: randomId(10), t: 'pdf', a: id, n, ...s }));
+          name = name || f.name;
+        } else {
+          setStatus(`Przygotowuję zdjęcie${of}…`, 'add');
+          const img = await imageToJpeg(f);
+          const { id } = await uploadAsset(img.blob, `Wysyłanie zdjęcia${of}`);
+          localImages.set(id, URL.createObjectURL(img.blob)); // zdjęcia zapamiętuje zwykła pamięć przeglądarki
+          newPages.push({ id: randomId(10), t: 'img', a: id, w: round2(width), h: round2(width * img.height / img.width) });
+          name = name || f.name.replace(/\.[^.]+$/, '');
+        }
+      }
+      setStatus('Dodaję strony…', 'add');
+      let res;
+      if (at === null) {
+        res = await emitAck('pages:replace', { pages: newPages, name });
+      } else {
+        jumpToId = newPages[0].id;
+        res = await emitAck('pages:insert', { at, pages: newPages, name });
+      }
+      if (res.error) throw Object.assign(new Error(res.error), { userMessage: res.error });
+      toast(newPages.length === 1 ? 'Dodano stronę' : `Dodano strony: ${newPages.length}`);
+    } catch (err) {
+      jumpToId = null;
+      console.error(err);
+      toast(err.userMessage || 'Nie udało się dodać plików');
+    } finally {
+      adding = false;
+      clearStatus('add');
+    }
+  }
+
+  function uploadAsset(blob, label, pdfPages) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/room/${roomId}/pdf${query ? '?' + query : ''}`);
-      xhr.setRequestHeader('Content-Type', 'application/pdf');
-      xhr.setRequestHeader('X-File-Name', encodeURIComponent(name));
-      xhr.upload.onprogress = (e) => e.lengthComputable && toast(`Wysyłanie… ${Math.round(e.loaded / e.total * 100)}%`, 60000);
+      xhr.open('POST', `/api/room/${roomId}/asset`);
+      xhr.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');
+      xhr.setRequestHeader('X-File-Name', encodeURIComponent(blob.name || ''));
+      if (pdfPages) xhr.setRequestHeader('X-Pages', String(pdfPages));
+      xhr.upload.onprogress = (e) => e.lengthComputable &&
+        setStatus(`${label}… ${Math.round(e.loaded / e.total * 100)}%`, 'add');
       xhr.onload = () => {
-        if (xhr.status === 200) { toast(doneMessage); resolve(); }
+        if (xhr.status === 200) resolve(JSON.parse(xhr.responseText));
         else reject(Object.assign(new Error(xhr.responseText), { userMessage: xhr.responseText || 'Błąd serwera' }));
       };
       xhr.onerror = () => reject(Object.assign(new Error('network'), { userMessage: 'Nie udało się wysłać pliku' }));
       xhr.send(blob);
     });
-  }
-
-  async function loadPdfLib() {
-    if (!window.PDFLib) await loadScript('/vendor/pdf-lib/pdf-lib.min.js');
-    return window.PDFLib;
-  }
-
-  // Dodaje do dokumentu `out` strony z pliku: wszystkie strony PDF-a albo jedno zdjęcie o szerokości `width`.
-  async function addFilePages(out, f, width) {
-    if (isPdfFile(f)) {
-      const src = await PDFLib.PDFDocument.load(await f.arrayBuffer(), { ignoreEncryption: true });
-      const copied = await out.copyPages(src, src.getPageIndices());
-      copied.forEach((p) => out.addPage(p));
-    } else {
-      const img = await out.embedJpg(await imageToJpeg(f));
-      const h = width * img.height / img.width;
-      out.addPage([width, h]).drawImage(img, { x: 0, y: 0, width, height: h });
-    }
-  }
-
-  // Skleja pliki (PDF-y i zdjęcia) w jeden PDF, w kolejności wyboru.
-  async function buildPdf(files) {
-    await loadPdfLib();
-    const out = await PDFLib.PDFDocument.create();
-    for (const f of files) await addFilePages(out, f, IMAGE_PAGE_WIDTH);
-    return new Blob([await out.save()], { type: 'application/pdf' });
-  }
-
-  // Wspólne dla wstawiania i usuwania stron: pobiera aktualny PDF, pozwala go zmienić i wysyła z powrotem.
-  // Serwer przesuwa zapiski razem ze stronami; `base` chroni przed nadpisaniem cudzej, równoczesnej zmiany.
-  let structureBusy = false;
-  async function changePages(prepare, query, doneMessage, jumpTo) {
-    if (structureBusy || !pdfInfo) return;
-    structureBusy = true;
-    const base = pdfInfo.version;
-    try {
-      toast('Przygotowuję strony…', 60000);
-      await loadPdfLib();
-      const bytes = await fetch(`/api/room/${roomId}/pdf?v=${base}`).then((r) => r.arrayBuffer());
-      const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
-      const { doc, extra } = await prepare(src);
-      const blob = new Blob([await doc.save()], { type: 'application/pdf' });
-      jumpToPage = jumpTo;
-      await uploadPdf(blob, pdfInfo.name, `${query(extra)}&base=${base}`, doneMessage);
-    } catch (err) {
-      jumpToPage = null;
-      console.error(err);
-      toast(err.userMessage || 'Nie udało się zmienić stron');
-    } finally {
-      structureBusy = false;
-    }
-  }
-
-  // Wstawia przed stroną `at` (at = liczba stron: na końcu) pustą stronę ('blank') i/lub pliki.
-  function insertPages(at, items) {
-    // Pusta strona i zdjęcia mają szerokość sąsiedniej strony (pusta także jej wysokość).
-    const ref = pages[Math.min(Math.max(at - 1, 0), pages.length - 1)];
-    const refW = ref.baseW, refH = ref.baseW * ref.aspect;
-    const range = (from, to) => Array.from({ length: to - from }, (_, i) => from + i);
-
-    return changePages(async (src) => {
-      const n = src.getPageCount();
-      const out = await PDFLib.PDFDocument.create();
-      const copyRange = async (from, to) => {
-        if (to <= from) return;
-        (await out.copyPages(src, range(from, to))).forEach((p) => out.addPage(p));
-      };
-      await copyRange(0, at);
-      for (const item of items) {
-        if (item === 'blank') out.addPage([refW, refH]);
-        else await addFilePages(out, item, refW);
-      }
-      const added = out.getPageCount() - at;
-      await copyRange(at, n);
-      return { doc: out, extra: added };
-    }, (added) => `insertAt=${at}&count=${added}`, items[0] === 'blank' ? 'Dodano pustą stronę' : 'Wstawiono strony', at);
-  }
-
-  function deletePage(i) {
-    return changePages(async (src) => {
-      src.removePage(i);
-      return { doc: src };
-    }, () => `deletePage=${i}`, `Usunięto stronę ${i + 1}`, Math.max(0, Math.min(i, pages.length - 2)));
   }
 
   async function imageToJpeg(file) {
@@ -732,9 +896,10 @@
       ctx.fillStyle = '#fff'; // przezroczyste tło (np. PNG) -> białe
       ctx.fillRect(0, 0, c.width, c.height);
       ctx.drawImage(img, 0, 0, c.width, c.height);
-      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9));
+      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+      const result = { blob, width: c.width, height: c.height };
       c.width = c.height = 0;
-      return blob.arrayBuffer();
+      return result;
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -750,21 +915,22 @@
   }
 
   $('#share').onclick = async () => {
-    const url = location.href;
+    const url = `${publicOrigin || location.origin}/?b=${roomId}`;
+    const note = publicOrigin ? '' : ' (uwaga: ten adres działa tylko w Twojej sieci domowej)';
     if (navigator.share && matchMedia('(pointer: coarse)').matches) {
-      try { await navigator.share({ title: 'Tablica PDF', url }); return; } catch { /* anulowano */ }
+      try { await navigator.share({ title: 'Tablica PDF', url }); if (note) toast('Link' + note, 5000); return; } catch { /* anulowano */ }
     }
     try {
       await navigator.clipboard.writeText(url);
-      toast('Link skopiowany – wyślij go uczniowi');
+      toast('Link skopiowany – wyślij go uczniowi' + note, note ? 5000 : 2200);
     } catch {
       prompt('Skopiuj ten link i wyślij uczniowi:', url);
     }
   };
 
   // ---------- pobieranie PDF z notatkami ----------
-  // Oryginalny PDF zostaje bez zmian (tekst nadal ostry), a notatki z każdej strony
-  // są nakładane na nią jako przezroczysty obraz.
+  // Strony z PDF-ów zostają oryginalne (tekst nadal ostry), puste strony i zdjęcia dochodzą jako nowe
+  // strony, a notatki z każdej strony są nakładane na nią jako przezroczysty obraz.
   const EXPORT_SCALE = 3; // piksele obrazu notatek na punkt PDF (~216 dpi)
   let exporting = false;
 
@@ -773,17 +939,31 @@
       const s = document.createElement('script');
       s.src = src;
       s.onload = resolve;
-      s.onerror = () => reject(new Error('Nie udało się wczytać ' + src));
+      s.onerror = () => { s.remove(); reject(new Error('Nie udało się wczytać ' + src)); };
       document.head.appendChild(s);
     });
   }
 
-  function inkPng(page, width, height) {
+  async function loadPdfLib() {
+    if (!window.PDFLib) await loadScript('/vendor/pdf-lib/pdf-lib.min.js');
+    return window.PDFLib;
+  }
+
+  // Bajty pliku do PDF-a z notatkami – najpierw z pamięci (PDF otwarty na tablicy, pamięć urządzenia),
+  // z serwera tylko to, czego jeszcze nie ma.
+  async function assetBytes(a, type) {
+    if (type === 'pdf') return (await getPdfDoc(a)).getData();
+    const r = await fetch(localImages.get(a) || assetUrl(a));
+    if (!r.ok) throw new Error('Brak pliku ' + a);
+    return r.arrayBuffer();
+  }
+
+  function inkPng(pageId, width, height) {
     const c = document.createElement('canvas');
     c.width = Math.round(width * EXPORT_SCALE);
     c.height = Math.round(height * EXPORT_SCALE);
     const ctx = c.getContext('2d');
-    for (const s of byPage.get(page) || []) drawStroke(ctx, s, 0, c.width);
+    for (const s of byPage.get(pageId) || []) drawStroke(ctx, s, 0, c.width);
     return new Promise((resolve) => c.toBlob((blob) => {
       c.width = c.height = 0;
       blob.arrayBuffer().then(resolve);
@@ -792,41 +972,56 @@
 
   async function exportPdf() {
     if (exporting) return;
-    if (!pdfDoc || !pdfInfo) { toast('Najpierw wgraj PDF'); return; }
+    if (!pages.length) { toast('Tablica nie ma jeszcze stron'); return; }
     exporting = true;
     try {
-      toast('Przygotowuję PDF…', 60000);
-      if (!window.PDFLib) await loadScript('/vendor/pdf-lib/pdf-lib.min.js');
-      const { PDFDocument, pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject } = PDFLib;
+      setStatus('Przygotowuję PDF…', 'export');
+      const [{ PDFDocument, pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject }, lib] =
+        await Promise.all([loadPdfLib(), pdfjs()]);
+      const out = await PDFDocument.create();
 
-      const bytes = await fetch(`/api/room/${roomId}/pdf?v=${pdfInfo.version}`).then((r) => r.arrayBuffer());
-      const out = await PDFDocument.load(bytes, { ignoreEncryption: true });
-      const outPages = out.getPages();
+      // Strony z PDF-ów: kopiowane naraz z każdego pliku (wspólne czcionki trafiają do wyniku raz).
+      const copies = new Map(); // id strony tablicy -> skopiowana strona
+      const byAsset = new Map();
+      for (const p of pages) if (p.desc.t === 'pdf') {
+        if (!byAsset.has(p.desc.a)) byAsset.set(p.desc.a, []);
+        byAsset.get(p.desc.a).push(p);
+      }
+      for (const [a, list] of byAsset) {
+        const src = await PDFDocument.load(await assetBytes(a, 'pdf'), { ignoreEncryption: true });
+        const copied = await out.copyPages(src, list.map((p) => p.desc.n));
+        list.forEach((p, i) => copies.set(p.id, copied[i]));
+      }
 
+      const images = new Map(); // assetId -> osadzone zdjęcie
       for (const p of pages) {
-        const list = byPage.get(p.index) || [];
-        if (!list.some((s) => s.tool === 'pen') || !outPages[p.index]) continue;
-        toast(`Przygotowuję PDF… strona ${p.index + 1} z ${pages.length}`, 60000);
-
-        // Widok pdf.js (z obrotem i przycięciem strony) -> układ współrzędnych PDF.
-        const vp = p.pdfPage.getViewport({ scale: 1 });
-        const png = await out.embedPng(await inkPng(p.index, vp.width, vp.height));
-        const toView = [vp.width, 0, 0, -vp.height, 0, vp.height];       // obraz 1×1 -> widok
-        const m = pdfjsLib.Util.transform(pdfjsLib.Util.inverseTransform(vp.transform), toView);
-
-        const page = outPages[p.index];
+        setStatus(`Przygotowuję PDF… strona ${p.index + 1} z ${pages.length}`, 'export');
+        const d = p.desc;
+        let page, w, h, m;
+        if (d.t === 'pdf') {
+          page = out.addPage(copies.get(p.id));
+          // Widok pdf.js (z obrotem i przycięciem strony) -> układ współrzędnych PDF.
+          const vp = (await getPdfPage(p)).getViewport({ scale: 1 });
+          w = vp.width; h = vp.height;
+          m = lib.Util.transform(lib.Util.inverseTransform(vp.transform), [w, 0, 0, -h, 0, h]);
+        } else {
+          w = d.w; h = d.h;
+          page = out.addPage([w, h]);
+          m = [w, 0, 0, h, 0, 0];
+          if (d.t === 'img') {
+            if (!images.has(d.a)) images.set(d.a, await out.embedJpg(await assetBytes(d.a, 'jpg')));
+            page.drawImage(images.get(d.a), { x: 0, y: 0, width: w, height: h });
+          }
+        }
+        if (!(byPage.get(p.id) || []).some((s) => s.tool === 'pen')) continue;
+        const png = await out.embedPng(await inkPng(p.id, w, h));
         const name = page.node.newXObject('Notatki', png.ref);
-        page.pushOperators(
-          pushGraphicsState(),
-          concatTransformationMatrix(...m),
-          drawObject(name),
-          popGraphicsState(),
-        );
+        page.pushOperators(pushGraphicsState(), concatTransformationMatrix(...m), drawObject(name), popGraphicsState());
       }
 
       const blob = new Blob([await out.save()], { type: 'application/pdf' });
       const date = new Date().toISOString().slice(0, 10);
-      const base = (boardTitle || pdfInfo.name || 'tablica').replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|]/g, '-');
+      const base = (boardTitle || docName || 'tablica').replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|]/g, '-');
       saveFile(blob, `${base} – notatki ${date}.pdf`);
       toast('PDF z notatkami gotowy');
     } catch (err) {
@@ -834,6 +1029,7 @@
       toast('Nie udało się przygotować PDF-a');
     } finally {
       exporting = false;
+      clearStatus('export');
     }
   }
 
@@ -850,6 +1046,7 @@
 
   $('#download').onclick = exportPdf;
 
+  // ---------- komunikaty ----------
   let toastTimer = null;
   function toast(msg, ms = 2200) {
     const t = $('#toast');
@@ -857,6 +1054,24 @@
     t.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+  }
+
+  // Stały pasek postępu (pobieranie, wysyłanie) – widoczny, dopóki trwa praca; ostatni komunikat wygrywa.
+  const statusMsgs = new Map();
+  function setStatus(text, key) {
+    statusMsgs.delete(key);
+    statusMsgs.set(key, text);
+    showStatus();
+  }
+  function clearStatus(key) {
+    statusMsgs.delete(key);
+    showStatus();
+  }
+  function showStatus() {
+    const el = $('#status');
+    const last = [...statusMsgs.values()].pop();
+    el.hidden = !last;
+    if (last) el.textContent = last;
   }
 
   // ---------- rysowanie i gesty ----------
@@ -885,17 +1100,17 @@
     if (e.pointerType === 'mouse' && e.button !== 0) return;
 
     const pageEl = e.target.closest('.page');
-    if (!pageEl) {
+    const page = pageEl && pageById.get(pageEl.dataset.id);
+    if (!page) {
       if (isTouch) startTouch(e);
       return;
     }
     e.preventDefault();
     stopMomentum();
-    const page = +pageEl.dataset.index;
     const eraser = tool === 'eraser' || (e.buttons & 32) !== 0;
     const stroke = {
       id: `${clientId}-${++strokeCounter}`,
-      page,
+      page: page.id,
       tool: eraser ? 'eraser' : 'pen',
       color: eraser ? '#000' : colors[colorIndex],
       size: eraser ? ERASER_SIZES[sizeIndex] : PEN_SIZES[sizeIndex],
@@ -946,7 +1161,8 @@
       const dx = x - pts[n - 2], dy = y - pts[n - 1];
       if (dx * dx + dy * dy < 1e-8) return; // pomiń punkty w tym samym miejscu
     }
-    const rx = Math.round(x * 1e5) / 1e5, ry = Math.round(y * 1e5) / 1e5;
+    // 4 miejsca po przecinku = 0,1 px przy stronie szerokiej na 1000 px; mniej danych do wysłania.
+    const rx = Math.round(x * 1e4) / 1e4, ry = Math.round(y * 1e4) / 1e4;
     pts.push(rx, ry);
     d.pending.push(rx, ry);
   }

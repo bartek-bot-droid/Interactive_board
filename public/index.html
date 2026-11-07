@@ -67,10 +67,12 @@
       <h1>Tablica PDF</h1>
       <p>Wgraj plik PDF albo zdjęcia – każdą stronę możecie razem zapisywać w czasie rzeczywistym.</p>
       <button id="emptyUpload" class="primary big">Wybierz PDF lub zdjęcia</button>
+      <button id="emptyBlank" class="plain big">albo zacznij od pustej strony</button>
       <p class="hint">Potem kliknij <b>Link</b> i wyślij go uczniowi.</p>
     </div>
-    <div id="loading" hidden>Wczytywanie…</div>
+    <div id="loading">Łączenie z tablicą…</div>
   </main>
+  <div id="status" role="status" hidden></div>
 
   <input id="fileInput" type="file" accept="application/pdf,.pdf,image/*" multiple hidden>
 
@@ -109,7 +111,6 @@
   <input id="colorInput" type="color" tabindex="-1" aria-hidden="true">
   <div id="toast" role="status"></div>
 
-  <script src="/vendor/pdfjs/pdf.min.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="app.js"></script>
 </body>

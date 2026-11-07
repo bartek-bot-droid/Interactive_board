@@ -285,7 +285,15 @@
     });
 
     // ---------- lista ----------
-    const boardUrl = (id) => `${location.origin}/?b=${id}`;
+    // W sieci domowej (szybki adres NAS-a) link dla ucznia to i tak adres internetowy tablicy.
+    const onLocalAddress = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname);
+    let publicOrigin = onLocalAddress ? null : location.origin;
+    if (onLocalAddress) fetch('/api/admin/public-url').then((r) => r.json()).then(({ url }) => { publicOrigin = url; }).catch(() => {});
+    const boardUrl = (id) => `${publicOrigin || location.origin}/?b=${id}`;
+    function rememberPublicOrigin() {
+      if (onLocalAddress || location.protocol !== 'https:' || !getToken()) return;
+      api('POST', '/public-url', { url: location.origin }).catch(() => {});
+    }
     const fmtTime = new Intl.DateTimeFormat('pl-PL', { hour: '2-digit', minute: '2-digit' });
     const fmtDate = new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: 'short', year: 'numeric' });
 
@@ -305,6 +313,7 @@
     async function loadBoards() {
       let boards;
       try { boards = await api('GET', '/boards'); } catch { return; }
+      rememberPublicOrigin();
       show('list');
       const box = $('#boards');
       box.textContent = '';
@@ -329,7 +338,8 @@
       const meta = document.createElement('div');
       meta.className = 'meta';
       const parts = [
-        b.pdfName ? b.pdfName : 'bez PDF',
+        b.pdfName ? b.pdfName : (b.pageCount ? '' : 'bez stron'),
+        b.pageCount ? `${b.pageCount} ${plural(b.pageCount, 'strona', 'strony', 'stron')}` : '',
         b.notes ? `${b.notes} ${plural(b.notes, 'zapisek', 'zapiski', 'zapisków')}` : '',
         'zmiana: ' + when(b.updatedAt),
         '?b=' + b.id,
